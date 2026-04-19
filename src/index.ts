@@ -93,9 +93,47 @@ function loadConfig() {
   const provider = resolveProviderConfig(file.provider);
   const githubToken =
     cliUrl || provider ? undefined : (file.githubToken ?? process.env.GITHUB_TOKEN ?? resolveGhToken());
+  const allowedUsersRaw = (file.allowedUsers ?? process.env.COPILOT_REMOTE_ALLOWED_USERS?.split(',') ?? []) as string[];
+  const allowedChatsRaw = (file.allowedChats ?? process.env.COPILOT_REMOTE_ALLOWED_CHATS?.split(',') ?? []) as string[];
+  const allowedUsers = allowedUsersRaw.map((u) => String(u).trim()).filter(Boolean);
+  const allowedChats = allowedChatsRaw.map((c) => String(c).trim()).filter(Boolean);
+  const userIdRe = /^\d{1,20}$/;
+  const chatIdRe = /^-?\d{1,20}$/;
+  for (const u of allowedUsers) {
+    if (!userIdRe.test(u)) {
+      throw new Error(
+        `Invalid allowedUsers entry: ${JSON.stringify(u)} — must be a numeric Telegram user ID (e.g. "123456789").`,
+      );
+    }
+  }
+  for (const c of allowedChats) {
+    if (!chatIdRe.test(c)) {
+      throw new Error(
+        `Invalid allowedChats entry: ${JSON.stringify(c)} — must be a numeric Telegram chat ID (e.g. "-1001234567890").`,
+      );
+    }
+  }
+  const autoPairOnFirstContact = file.autoPairOnFirstContact === true || process.env.COPILOT_REMOTE_AUTO_PAIR === '1';
+
+  const DEFAULT_TURN_TIMEOUT_MS = 30 * 60 * 1000;
+  const turnTimeoutRaw = file.turnTimeoutMs ?? process.env.COPILOT_REMOTE_TURN_TIMEOUT_MS;
+  let turnTimeoutMs: number = DEFAULT_TURN_TIMEOUT_MS;
+  if (turnTimeoutRaw !== undefined && turnTimeoutRaw !== null && turnTimeoutRaw !== '') {
+    const parsed = Number(turnTimeoutRaw);
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      throw new Error(
+        `Invalid turnTimeoutMs: ${JSON.stringify(turnTimeoutRaw)} — must be a non-negative integer (ms). 0 = SDK default (60_000).`,
+      );
+    }
+    turnTimeoutMs = parsed;
+  }
+
   return {
     botToken,
-    allowedUsers: file.allowedUsers ?? process.env.COPILOT_REMOTE_ALLOWED_USERS?.split(',').filter(Boolean) ?? [],
+    allowedUsers,
+    allowedChats,
+    autoPairOnFirstContact,
+    turnTimeoutMs,
     workDir: file.workDir ?? process.env.COPILOT_REMOTE_WORKDIR ?? process.cwd(),
     copilotBinary: file.copilotBinary ?? process.env.COPILOT_REMOTE_BINARY,
     cliUrl,
@@ -193,6 +231,8 @@ async function main(): Promise<void> {
     : new TelegramClient({
         botToken,
         allowedUsers: config.allowedUsers,
+        allowedChats: config.allowedChats,
+        autoPairOnFirstContact: config.autoPairOnFirstContact,
         profilePhoto: config.profilePhoto,
       });
 
@@ -537,6 +577,7 @@ async function main(): Promise<void> {
       githubToken: config.githubToken,
       infiniteSessions: c.infiniteSessions,
       messageMode: c.messageMode || undefined,
+      turnTimeoutMs: config.turnTimeoutMs,
       provider: globalCfg.provider ?? config.provider,
       mcpServers: (() => {
         const { merged, sources } = loadMcpServers(globalCfg.mcpServers, cwd);
@@ -1330,13 +1371,19 @@ async function main(): Promise<void> {
       }
 
       // Kill the broken session so it doesn't linger
-      try {
-        session.kill();
-      } catch {
-        /* ignore */
+      // EXCEPTION: a turn-timeout AFTER first delta means the agent was actively producing events
+      // and is just doing slow work. The SDK's sendAndWait timeout does NOT abort the agent itself
+      // (per @github/copilot-sdk docs). Preserve the session so the user doesn't lose context.
+      const isPostDeltaTimeout = isTimeout && !hadNoCopilotEvents;
+      if (!isPostDeltaTimeout) {
+        try {
+          session.kill();
+        } catch {
+          /* ignore */
+        }
+        sessions.delete(chatId);
+        await purgeSessionPersistence(chatId, session.sessionId ?? undefined);
       }
-      sessions.delete(chatId);
-      await purgeSessionPersistence(chatId, session.sessionId ?? undefined);
       if (errMsg.toLowerCase().includes('timeout')) {
         logPromptTimeline('timeout', firstStreamPhase ?? 'none');
         log.warn(
@@ -1348,6 +1395,7 @@ async function main(): Promise<void> {
           `sessionId=${session.sessionId ?? '-'}`,
           `elapsed=${Math.round(performance.now() - turnStartedAt)}ms`,
           `phase=${firstStreamPhase ?? 'none'}`,
+          `sessionPreserved=${isPostDeltaTimeout}`,
         );
       } else {
         logPromptTimeline('failed', errMsg.slice(0, 80));
@@ -1364,11 +1412,14 @@ async function main(): Promise<void> {
         );
       }
       react(LIFECYCLE_REACTIONS.error);
+      const timeoutMins = config.turnTimeoutMs ? Math.round(config.turnTimeoutMs / 60_000) : 1;
       const userMsg = errMsg.includes('STREAM_DESTROYED')
         ? '💀 Lost connection to Copilot. Send a message to reconnect.'
-        : errMsg.includes('timeout')
-          ? '⏱️ Request timed out. Send a message to try again.'
-          : '❌ `' + errMsg.slice(0, 200) + '`\nSend a message to start a new session.';
+        : isPostDeltaTimeout
+          ? `⏱️ Turn exceeded ${timeoutMins} min — your session is preserved (the agent may still be working). Send another message to continue, or /abort to cancel.`
+          : errMsg.includes('timeout')
+            ? '⏱️ Request timed out. Send a message to try again.'
+            : '❌ `' + errMsg.slice(0, 200) + '`\nSend a message to start a new session.';
       await client.sendMessage(chatId, userMsg, { replyTo: msgId });
       return;
     }

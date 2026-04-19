@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Access control (BREAKING)
+- **Multi-user `allowedUsers`** — every entry is now honored. Previously only `allowedUsers[0]` was authorized; additional entries were silently dropped.
+- **New `allowedChats`** — optional list of chat IDs to scope where authorized users can drive the bot. Recommended for shared-supergroup setups; omit for DM-only.
+- **Default-deny on empty allowlist (BREAKING)** — when `allowedUsers` is empty, the bot now refuses all messages instead of auto-pairing with the first sender. Set `"autoPairOnFirstContact": true` to restore the legacy behavior.
+- **Bot accounts always denied** — updates from `is_bot: true` accounts are dropped before allowlist checks.
+- **Hardened denial replies** — generic `⛔ Not authorized.` (no pairing-detail leak), rate-limited to one reply per user per minute.
+- **Config validation at startup** — invalid entries in `allowedUsers` / `allowedChats` throw a clear error instead of silently locking everyone out.
+- New env vars: `COPILOT_REMOTE_ALLOWED_CHATS`, `COPILOT_REMOTE_AUTO_PAIR`.
+
+### Reliability
+- **Configurable per-turn timeout (`turnTimeoutMs`, default 30 min)** — replaces the SDK's 60 s default that aborted tool-heavy turns (Playwright browsing, deep research). Env: `COPILOT_REMOTE_TURN_TIMEOUT_MS`.
+- **Preserve session on post-stream timeout** — when a timeout fires after the agent has already started streaming (the SDK's `sendAndWait` timeout doesn't actually abort in-flight agent work), the session is kept in memory and on disk so the next message continues the same conversation. Pre-stream timeouts still purge as before to recover wedged sessions.
+
 ## 0.8.1 (2026-03-10)
 
 ### Install & Uninstall

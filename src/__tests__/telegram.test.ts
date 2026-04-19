@@ -465,3 +465,155 @@ describe('TelegramClient draft failure handling', () => {
     assert.equal(calls.length, 2);
   });
 });
+
+describe('TelegramClient access control', () => {
+  function makeBotUpdate(args: { messageId: number; chatId: number; fromId: number; text: string }): Update {
+    return {
+      update_id: 99,
+      message: {
+        message_id: args.messageId,
+        date: 1,
+        chat: { id: args.chatId, type: 'private', first_name: 'BotChat' },
+        from: { id: args.fromId, is_bot: true, first_name: 'EvilBot', username: 'evil_bot' },
+        text: args.text,
+      },
+    } as unknown as Update;
+  }
+
+  it('accepts messages from any user in allowedUsers (multi-user)', async () => {
+    const client = new TelegramClient({
+      botToken: 'test-token',
+      allowedUsers: ['111', '222'],
+    });
+    const { bot } = await createTelegramHarness(client);
+
+    const seen: string[] = [];
+    client.onMessage = async (text) => {
+      seen.push(text);
+    };
+
+    await bot.handleUpdate(makeTextUpdate({ messageId: 1, chatId: 111, fromId: 111, text: 'from user 111' }));
+    await bot.handleUpdate(makeTextUpdate({ messageId: 2, chatId: 222, fromId: 222, text: 'from user 222' }));
+
+    assert.deepEqual(seen, ['from user 111', 'from user 222']);
+  });
+
+  it('rejects messages from users not in allowedUsers', async () => {
+    const client = new TelegramClient({
+      botToken: 'test-token',
+      allowedUsers: ['111'],
+      denialReplyJitterMs: [0, 0],
+    });
+    const { bot, calls } = await createTelegramHarness(client);
+
+    let invoked = 0;
+    client.onMessage = async () => {
+      invoked++;
+    };
+
+    await bot.handleUpdate(makeTextUpdate({ messageId: 1, chatId: 999, fromId: 999, text: 'intruder' }));
+
+    assert.equal(invoked, 0);
+    const denials = calls.filter(
+      (c) => c.method === 'sendMessage' && String(c.payload.text ?? '').includes('Not authorized'),
+    );
+    assert.equal(denials.length, 1, 'should send one denial reply');
+    assert.ok(!String(denials[0].payload.text).includes('paired'), 'denial reply must not leak pairing details');
+  });
+
+  it('rate-limits denial replies to one per user per minute', async () => {
+    const client = new TelegramClient({
+      botToken: 'test-token',
+      allowedUsers: ['111'],
+      denialReplyJitterMs: [0, 0],
+    });
+    const { bot, calls } = await createTelegramHarness(client);
+
+    await bot.handleUpdate(makeTextUpdate({ messageId: 1, chatId: 999, fromId: 999, text: 'first' }));
+    await bot.handleUpdate(makeTextUpdate({ messageId: 2, chatId: 999, fromId: 999, text: 'second' }));
+    await bot.handleUpdate(makeTextUpdate({ messageId: 3, chatId: 999, fromId: 999, text: 'third' }));
+
+    const denials = calls.filter(
+      (c) => c.method === 'sendMessage' && String(c.payload.text ?? '').includes('Not authorized'),
+    );
+    assert.equal(denials.length, 1, 'should send only one denial across rapid repeated denials');
+  });
+
+  it('denies messages from authorized users when chat is not in allowedChats', async () => {
+    const client = new TelegramClient({
+      botToken: 'test-token',
+      allowedUsers: ['111'],
+      allowedChats: ['-1001234567890'],
+    });
+    const { bot } = await createTelegramHarness(client);
+
+    let invoked = 0;
+    client.onMessage = async () => {
+      invoked++;
+    };
+
+    // Same user (111) but in a private chat with chatId=111 (not in allowedChats)
+    await bot.handleUpdate(makeTextUpdate({ messageId: 1, chatId: 111, fromId: 111, text: 'wrong chat' }));
+    assert.equal(invoked, 0);
+
+    // Now in the allowed supergroup
+    await bot.handleUpdate(
+      makeTextUpdate({ messageId: 2, chatId: -1001234567890, fromId: 111, text: 'ok', threadId: 5 }),
+    );
+    assert.equal(invoked, 1);
+  });
+
+  it('denies all messages when allowedUsers is empty (no auto-pair by default)', async () => {
+    const client = new TelegramClient({
+      botToken: 'test-token',
+      allowedUsers: [],
+    });
+    const { bot } = await createTelegramHarness(client);
+
+    let invoked = 0;
+    client.onMessage = async () => {
+      invoked++;
+    };
+
+    await bot.handleUpdate(makeTextUpdate({ messageId: 1, chatId: 100, fromId: 100, text: 'first' }));
+    await bot.handleUpdate(makeTextUpdate({ messageId: 2, chatId: 200, fromId: 200, text: 'second' }));
+
+    assert.equal(invoked, 0);
+  });
+
+  it('opt-in autoPairOnFirstContact pairs first sender and rejects others', async () => {
+    const client = new TelegramClient({
+      botToken: 'test-token',
+      allowedUsers: [],
+      autoPairOnFirstContact: true,
+    });
+    const { bot } = await createTelegramHarness(client);
+
+    const seen: string[] = [];
+    client.onMessage = async (text) => {
+      seen.push(text);
+    };
+
+    await bot.handleUpdate(makeTextUpdate({ messageId: 1, chatId: 100, fromId: 100, text: 'paired' }));
+    await bot.handleUpdate(makeTextUpdate({ messageId: 2, chatId: 200, fromId: 200, text: 'rejected' }));
+
+    assert.deepEqual(seen, ['paired']);
+  });
+
+  it('always rejects messages from bot accounts even if their id is in allowedUsers', async () => {
+    const client = new TelegramClient({
+      botToken: 'test-token',
+      allowedUsers: ['555'],
+    });
+    const { bot } = await createTelegramHarness(client);
+
+    let invoked = 0;
+    client.onMessage = async () => {
+      invoked++;
+    };
+
+    await bot.handleUpdate(makeBotUpdate({ messageId: 1, chatId: 555, fromId: 555, text: 'bot speaks' }));
+
+    assert.equal(invoked, 0);
+  });
+});

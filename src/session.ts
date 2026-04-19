@@ -128,7 +128,14 @@ export interface SessionOptions {
   systemInstructions?: string;
   availableTools?: string[];
   excludedTools?: string[];
-  /** Idle timeout in ms — kills turn if no SDK events for this duration. 0 = disabled. Default: 900000 (15 min) */
+  /**
+   * Per-turn timeout in ms passed as the second arg to SDK `sendAndWait`.
+   * The SDK rejects the awaited promise if `session.idle` doesn't arrive in time
+   * (the agent itself is NOT killed — see SDK doc on `sendAndWait`).
+   * 0 / undefined => SDK default (60_000ms, too short for tool-heavy turns).
+   * Recommended: 1_800_000 (30 min). Set higher for very long autopilot work.
+   */
+  turnTimeoutMs?: number;
 }
 
 export interface CopilotMessage {
@@ -322,6 +329,7 @@ export class Session extends EventEmitter {
   private _turnActive = false;
   private _autopilot = false;
   private _messageMode: 'enqueue' | 'immediate' | undefined = undefined;
+  private _turnTimeoutMs: number | undefined = undefined;
   private cwd = '';
   private activeTurnId: string | null = null;
   private activeSendReservation: SessionTurnReservation | null = null;
@@ -541,6 +549,7 @@ export class Session extends EventEmitter {
     this.cwd = opts.cwd;
     this._autopilot = opts.autopilot ?? false;
     this._messageMode = opts.messageMode;
+    this._turnTimeoutMs = opts.turnTimeoutMs && opts.turnTimeoutMs > 0 ? opts.turnTimeoutMs : undefined;
 
     this.client = await Session.getSharedClient({
       binary: opts.binary,
@@ -795,10 +804,11 @@ export class Session extends EventEmitter {
             mode: sendOpts.mode ?? 'default',
             attachments: attachments?.length ?? 0,
             promptChars: prompt.length,
+            turnTimeoutMs: this._turnTimeoutMs ?? 'sdk-default',
           }),
         );
 
-        const result = await Promise.race([this.session!.sendAndWait(sendOpts), errorPromise]);
+        const result = await Promise.race([this.session!.sendAndWait(sendOpts, this._turnTimeoutMs), errorPromise]);
         const resultContent =
           (result as { data?: { content?: string }; content?: string } | undefined)?.data?.content ??
           (result as { content?: string } | undefined)?.content ??
@@ -950,6 +960,7 @@ export class Session extends EventEmitter {
     this.cwd = opts.cwd;
     this._autopilot = opts.autopilot ?? false;
     this._messageMode = opts.messageMode;
+    this._turnTimeoutMs = opts.turnTimeoutMs && opts.turnTimeoutMs > 0 ? opts.turnTimeoutMs : undefined;
 
     if (!this.client) {
       this.client = await Session.getSharedClient({

@@ -28,9 +28,26 @@ type MyContext = HydrateFlavor<FileFlavor<Context>>;
 
 export interface TelegramConfig {
   botToken: string;
+  /** Telegram user IDs (numeric strings) that may interact with the bot. Empty = deny all unless autoPairOnFirstContact. */
   allowedUsers: string[];
+  /** Optional Telegram chat IDs (numeric strings; supergroups/channels are negative, e.g. "-1001234567890"). When set, messages outside these chats are denied even from authorized users. */
+  allowedChats?: string[];
+  /** Legacy behavior: if allowedUsers is empty, pair with the first user that messages the bot. Defaults to false (deny all). */
+  autoPairOnFirstContact?: boolean;
+  /** Override jitter range (ms) for denial replies — `[min, max]`. Defaults to `[20_000, 120_000]`.
+   *  Set to `[0, 0]` for synchronous replies (used by tests). */
+  denialReplyJitterMs?: [number, number];
   profilePhoto?: string;
 }
+
+/** Min interval between denial replies sent to the same user (anti-oracle, anti-flood). */
+const DENIAL_REPLY_INTERVAL_MS = 60_000;
+/** Max age for entries in the denial-reply timestamp map. */
+const DENIAL_MAP_TTL_MS = 60 * 60_000;
+/** Jitter window for denial replies — randomized delay before sending kills the timing oracle that
+ *  would otherwise let a probe distinguish "denied" (~ms) from "authorized & processing" (seconds). */
+const DENIAL_REPLY_JITTER_MIN_MS = 20_000;
+const DENIAL_REPLY_JITTER_MAX_MS = 120_000;
 
 type RawApi = Record<string, (...args: unknown[]) => unknown>;
 
@@ -38,7 +55,11 @@ export class TelegramClient implements Client {
   readonly name = 'telegram';
   private bot: Bot<MyContext>;
   private runner: RunnerHandle | null = null;
-  private pairedUser: string | null = null;
+  private allowedUsers: Set<string>;
+  private allowedChats: Set<string> | null;
+  private autoPairOnFirstContact: boolean;
+  private denialReplyJitterMs: [number, number];
+  private lastDenialReplyAt = new Map<string, number>();
   private topicNames = new Map<string, string>();
   private msgThreadMap = new Map<number, number>(); // msgId → threadId for callback resolution
   private updateSeq = 0;
@@ -105,9 +126,13 @@ export class TelegramClient implements Client {
     this.bot.api.config.use(hydrateFiles(config.botToken));
     this.bot.use(hydrate());
 
-    if (config.allowedUsers.length > 0) {
-      this.pairedUser = config.allowedUsers[0];
-    }
+    this.allowedUsers = new Set(config.allowedUsers.map((u) => u.trim()).filter(Boolean));
+    this.allowedChats =
+      config.allowedChats && config.allowedChats.length > 0
+        ? new Set(config.allowedChats.map((c) => c.trim()).filter(Boolean))
+        : null;
+    this.autoPairOnFirstContact = config.autoPairOnFirstContact === true;
+    this.denialReplyJitterMs = config.denialReplyJitterMs ?? [DENIAL_REPLY_JITTER_MIN_MS, DENIAL_REPLY_JITTER_MAX_MS];
 
     this.setupHandlers();
 
@@ -123,14 +148,48 @@ export class TelegramClient implements Client {
     });
   }
 
-  private isAllowed(userId: number | undefined): boolean {
-    const id = String(userId);
-    if (!this.pairedUser) {
-      this.pairedUser = id;
-      log.info('[Telegram] Auto-paired with user ' + id);
-      return true;
+  /**
+   * Check whether an inbound update is allowed.
+   * Default-deny: bots are always rejected; unknown users are rejected unless autoPairOnFirstContact is on
+   * and the allowlist is empty; even authorized users are restricted to allowedChats when configured.
+   */
+  private isAllowed(
+    userId: number | undefined,
+    chatId: number | undefined,
+    isBot: boolean | undefined,
+  ): { allowed: boolean; reason?: string } {
+    if (isBot === true) return { allowed: false, reason: 'bot-account' };
+    if (userId === undefined) return { allowed: false, reason: 'no-user' };
+    const uid = String(userId);
+    const cid = chatId === undefined ? '' : String(chatId);
+
+    if (this.allowedUsers.size === 0) {
+      if (!this.autoPairOnFirstContact) return { allowed: false, reason: 'no-allowlist' };
+      this.allowedUsers.add(uid);
+      log.warn('[Telegram] Auto-paired with user ' + uid + ' (autoPairOnFirstContact). Lock this in via allowedUsers.');
+      // fall through to chat check
+    } else if (!this.allowedUsers.has(uid)) {
+      return { allowed: false, reason: 'user-not-allowed' };
     }
-    return id === this.pairedUser;
+
+    if (this.allowedChats && !this.allowedChats.has(cid)) {
+      return { allowed: false, reason: 'chat-not-allowed' };
+    }
+
+    return { allowed: true };
+  }
+
+  /** Should we send a denial reply to this user right now? Rate-limited to one per DENIAL_REPLY_INTERVAL_MS. */
+  private shouldSendDenialReply(userId: string): boolean {
+    const now = Date.now();
+    // Evict stale entries to bound memory growth.
+    for (const [k, t] of this.lastDenialReplyAt) {
+      if (now - t > DENIAL_MAP_TTL_MS) this.lastDenialReplyAt.delete(k);
+    }
+    const last = this.lastDenialReplyAt.get(userId);
+    if (last !== undefined && now - last < DENIAL_REPLY_INTERVAL_MS) return false;
+    this.lastDenialReplyAt.set(userId, now);
+    return true;
   }
 
   private setupHandlers(): void {
@@ -147,9 +206,35 @@ export class TelegramClient implements Client {
     });
 
     this.bot.use(async (ctx, next) => {
-      if (!this.isAllowed(ctx.from?.id)) {
-        if (ctx.chat?.type === 'private') {
-          await ctx.reply('⛔ This instance is paired with another user.', { parse_mode: undefined });
+      const verdict = this.isAllowed(ctx.from?.id, ctx.chat?.id, ctx.from?.is_bot);
+      if (!verdict.allowed) {
+        log.warn(
+          '[Telegram] Denied update',
+          ...formatLogFields({
+            reason: verdict.reason,
+            userId: ctx.from?.id,
+            chatId: ctx.chat?.id,
+            chatType: ctx.chat?.type,
+            isBot: ctx.from?.is_bot,
+          }),
+        );
+        if (
+          verdict.reason !== 'bot-account' &&
+          ctx.chat?.type === 'private' &&
+          ctx.from?.id !== undefined &&
+          this.shouldSendDenialReply(String(ctx.from.id))
+        ) {
+          // Fire-and-forget with random jitter to defeat timing oracles. Do NOT await — the
+          // attacker must not be able to learn anything from response timing of the inbound update.
+          const [jMin, jMax] = this.denialReplyJitterMs;
+          const delay = jMax > jMin ? jMin + Math.floor(Math.random() * (jMax - jMin)) : jMin;
+          if (delay <= 0) {
+            await ctx.reply('⛔ Not authorized.', { parse_mode: undefined }).catch(() => {});
+          } else {
+            setTimeout(() => {
+              ctx.reply('⛔ Not authorized.', { parse_mode: undefined }).catch(() => {});
+            }, delay).unref?.();
+          }
         }
         return;
       }
@@ -295,8 +380,20 @@ export class TelegramClient implements Client {
       const r = ctx.messageReaction;
       const chatId = String(ctx.chatId ?? '');
       const threadId = (r as unknown as Record<string, unknown>)?.message_thread_id as number | undefined;
-      const userId = String(ctx.from?.id ?? (r as unknown as Record<string, { id?: number }>).actor_chat?.id ?? '');
-      if (userId !== this.pairedUser || !chatId) return;
+      // Reactions don't go through the auth middleware in all cases; gate explicitly via isAllowed().
+      // IMPORTANT: do NOT fall back to actor_chat.id — that's a *chat* id (anonymous group admins,
+      // channels reacting as themselves), and treating it as a user id would break the allowlist
+      // contract. If from.id is missing, refuse.
+      const fromId = ctx.from?.id;
+      const verdict = this.isAllowed(fromId, ctx.chatId, ctx.from?.is_bot);
+      if (!verdict.allowed) {
+        log.debug(
+          '[Telegram] Denied reaction',
+          ...formatLogFields({ reason: verdict.reason, userId: fromId, chatId: ctx.chatId, isBot: ctx.from?.is_bot }),
+        );
+        return;
+      }
+      if (!chatId) return;
       const emojis = (r.new_reaction ?? []).filter((e) => e.type === 'emoji').map((e) => e.emoji);
       for (const emoji of emojis) this.onReaction?.(emoji, chatId, r.message_id, threadId);
     });
@@ -330,10 +427,18 @@ export class TelegramClient implements Client {
       ])
       .catch(() => {});
 
-    if (this.pairedUser) {
-      log.info('[Telegram] Polling started — paired with user ' + this.pairedUser);
+    if (this.allowedUsers.size > 0) {
+      log.info('[Telegram] Polling started — authorized users: ' + [...this.allowedUsers].join(', '));
+    } else if (this.autoPairOnFirstContact) {
+      log.warn('[Telegram] Polling started — allowedUsers empty; will auto-pair with first sender (legacy mode).');
     } else {
-      log.info('[Telegram] Polling started — waiting for first user to pair');
+      log.warn(
+        '[Telegram] ⚠️  allowedUsers is empty and autoPairOnFirstContact is false — bot will refuse ALL messages. ' +
+          'Set "allowedUsers" in ~/.copilot-remote/config.json or COPILOT_REMOTE_ALLOWED_USERS env var.',
+      );
+    }
+    if (this.allowedChats) {
+      log.info('[Telegram] Restricted to chats: ' + [...this.allowedChats].join(', '));
     }
 
     // Drop any stale getUpdates connections from previous instances
