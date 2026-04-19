@@ -442,7 +442,7 @@ export class Session extends EventEmitter {
 
     return {
       ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
-      clientName: 'copilot-remote',
+      clientName: 'vscode',
       streaming: true,
       workingDirectory: this.cwd,
       systemMessage: {
