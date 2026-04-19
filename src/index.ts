@@ -1511,7 +1511,7 @@ async function main(): Promise<void> {
         if (['yes', 'y', 'approve', '👍'].includes(lower)) {
           s.approve();
           pendingPerms.delete(replyToMsgId);
-          await client.editButtons(chatId, replyToMsgId, '✅ Approved', []);
+          await client.deleteMessage?.(chatId, replyToMsgId);
           return;
         }
         if (['no', 'n', 'deny', '👎'].includes(lower)) {
@@ -2475,7 +2475,7 @@ async function main(): Promise<void> {
     if (emoji === '👍' || emoji === '✅') {
       s.approve();
       pendingPerms.delete(msgId);
-      await client.editButtons(chatId, msgId, '✅ Approved', []);
+      await client.deleteMessage?.(chatId, msgId);
     } else if (emoji === '👎' || emoji === '❌') {
       s.deny();
       pendingPerms.delete(msgId);
@@ -2590,10 +2590,10 @@ async function main(): Promise<void> {
           if (cid === chatId) {
             s.approve();
             pendingPerms.delete(id);
-            if (id !== msgId) client.editButtons(chatId, id, '✅', []).catch(() => {});
+            if (id !== msgId) client.deleteMessage?.(chatId, id).catch(() => {});
           }
         }
-        await client.editButtons(chatId, msgId, '✅ All approved', []);
+        await client.deleteMessage?.(chatId, msgId);
       } else {
         const ok = data === 'perm:yes';
         if (ok) {
@@ -2602,7 +2602,12 @@ async function main(): Promise<void> {
           s.deny();
         }
         pendingPerms.delete(msgId);
-        await client.editButtons(chatId, msgId, ok ? '✅' : '❌', []);
+        if (ok) {
+          await client.deleteMessage?.(chatId, msgId);
+        } else {
+          // Keep denial visible — user may want to know what was rejected.
+          await client.editButtons(chatId, msgId, '❌', []);
+        }
       }
       return;
     }
