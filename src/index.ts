@@ -442,11 +442,13 @@ async function main(): Promise<void> {
 
     // Helper: resolve bot API + numeric chat ID for direct Telegram API calls
     type BotApi = Record<string, (...args: unknown[]) => unknown>;
-    const getBotApi = (): { tc: BotApi; numericId: number } => {
+    const getBotApi = (): { tc: BotApi; numericId: number; threadOpts: { message_thread_id?: number } } => {
       const tc = (client as unknown as { bot?: { api: BotApi } }).bot?.api;
       if (!tc) throw new Error('No bot API');
-      const numericId = chatId.includes(':') ? Number(chatId.split(':')[0]) : Number(chatId);
-      return { tc, numericId };
+      const [chatPart, threadPart] = chatId.includes(':') ? chatId.split(':') : [chatId];
+      const numericId = Number(chatPart);
+      const threadOpts = threadPart ? { message_thread_id: Number(threadPart) } : {};
+      return { tc, numericId, threadOpts };
     };
 
     // Helper: wrap a tool event handler with standard error reporting
@@ -462,35 +464,35 @@ async function main(): Promise<void> {
 
     toolHandler<{ path: string; caption?: string }>('file', async (info) => {
       const { InputFile } = await import('grammy');
-      const { tc, numericId } = getBotApi();
+      const { tc, numericId, threadOpts } = getBotApi();
       const ext = info.path.split('.').pop()?.toLowerCase() ?? '';
       const file = new InputFile(info.path);
       const audioExts = ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a'];
       const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
       const videoExts = ['mp4', 'mov', 'avi', 'mkv', 'webm'];
-      if (audioExts.includes(ext)) await tc.sendAudio(numericId, file, { caption: info.caption });
-      else if (imageExts.includes(ext)) await tc.sendPhoto(numericId, file, { caption: info.caption });
-      else if (videoExts.includes(ext)) await tc.sendVideo(numericId, file, { caption: info.caption });
-      else await tc.sendDocument(numericId, file, { caption: info.caption });
+      if (audioExts.includes(ext)) await tc.sendAudio(numericId, file, { caption: info.caption, ...threadOpts });
+      else if (imageExts.includes(ext)) await tc.sendPhoto(numericId, file, { caption: info.caption, ...threadOpts });
+      else if (videoExts.includes(ext)) await tc.sendVideo(numericId, file, { caption: info.caption, ...threadOpts });
+      else await tc.sendDocument(numericId, file, { caption: info.caption, ...threadOpts });
     });
 
     toolHandler<{ path: string; caption?: string }>('photo', async (info) => {
       const { InputFile } = await import('grammy');
-      const { tc, numericId } = getBotApi();
+      const { tc, numericId, threadOpts } = getBotApi();
       const source = info.path.startsWith('http') ? info.path : new InputFile(info.path);
-      await tc.sendPhoto(numericId, source, { caption: info.caption });
+      await tc.sendPhoto(numericId, source, { caption: info.caption, ...threadOpts });
     });
 
     toolHandler<{ lat: number; lon: number; title?: string }>('location', async (info) => {
-      const { tc, numericId } = getBotApi();
-      if (info.title) await tc.sendVenue(numericId, info.lat, info.lon, info.title, '');
-      else await tc.sendLocation(numericId, info.lat, info.lon);
+      const { tc, numericId, threadOpts } = getBotApi();
+      if (info.title) await tc.sendVenue(numericId, info.lat, info.lon, info.title, '', threadOpts);
+      else await tc.sendLocation(numericId, info.lat, info.lon, threadOpts);
     });
 
     toolHandler<{ path: string; caption?: string }>('voice', async (info) => {
       const { InputFile } = await import('grammy');
-      const { tc, numericId } = getBotApi();
-      await tc.sendVoice(numericId, new InputFile(info.path), { caption: info.caption });
+      const { tc, numericId, threadOpts } = getBotApi();
+      await tc.sendVoice(numericId, new InputFile(info.path), { caption: info.caption, ...threadOpts });
     });
 
     toolHandler<{ messageId: number }>('pin', async (info) => {
@@ -518,8 +520,8 @@ async function main(): Promise<void> {
     });
 
     toolHandler<{ phone: string; firstName: string; lastName?: string }>('contact', async (info) => {
-      const { tc, numericId } = getBotApi();
-      await tc.sendContact(numericId, info.phone, info.firstName, { last_name: info.lastName });
+      const { tc, numericId, threadOpts } = getBotApi();
+      await tc.sendContact(numericId, info.phone, info.firstName, { last_name: info.lastName, ...threadOpts });
     });
 
     session.on(
@@ -531,10 +533,11 @@ async function main(): Promise<void> {
         allowsMultiple?: boolean;
         resolve: (id: number) => void;
       }) => {
-        const { tc, numericId } = getBotApi();
+        const { tc, numericId, threadOpts } = getBotApi();
         const msg = (await tc.sendPoll(numericId, info.question, info.options, {
           is_anonymous: info.isAnonymous ?? true,
           allows_multiple_answers: info.allowsMultiple ?? false,
+          ...threadOpts,
         })) as { message_id: number };
         info.resolve(msg.message_id);
       },
