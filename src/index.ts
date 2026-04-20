@@ -1386,6 +1386,7 @@ async function main(): Promise<void> {
       // and is just doing slow work. The SDK's sendAndWait timeout does NOT abort the agent itself
       // (per @github/copilot-sdk docs). Preserve the session so the user doesn't lose context.
       const isPostDeltaTimeout = isTimeout && !hadNoCopilotEvents;
+      const isSessionNotFound = errMsg.includes('Session not found');
       if (!isPostDeltaTimeout) {
         try {
           session.kill();
@@ -1393,7 +1394,13 @@ async function main(): Promise<void> {
           /* ignore */
         }
         sessions.delete(chatId);
-        await purgeSessionPersistence(chatId, session.sessionId ?? undefined);
+        // Only purge disk state for genuinely unrecoverable errors (corruption, schema mismatch).
+        // "Session not found" means the CLI evicted the session from memory after idle — the
+        // events.jsonl on disk is still valid and session.resume can reload it. Purging here
+        // would destroy conversation history and make resume impossible.
+        if (!isSessionNotFound) {
+          await purgeSessionPersistence(chatId, session.sessionId ?? undefined);
+        }
       }
       if (errMsg.toLowerCase().includes('timeout')) {
         logPromptTimeline('timeout', firstStreamPhase ?? 'none');
@@ -1430,7 +1437,9 @@ async function main(): Promise<void> {
           ? `⏱️ Turn exceeded ${timeoutMins} min — your session is preserved (the agent may still be working). Send another message to continue, or /abort to cancel.`
           : errMsg.includes('timeout')
             ? '⏱️ Request timed out. Send a message to try again.'
-            : '❌ `' + errMsg.slice(0, 200) + '`\nSend a message to start a new session.';
+            : isSessionNotFound
+              ? '🔄 Session expired from memory — send another message to resume from disk.'
+              : '❌ `' + errMsg.slice(0, 200) + '`\nSend a message to start a new session.';
       await client.sendMessage(chatId, userMsg, { replyTo: msgId });
       return;
     }
