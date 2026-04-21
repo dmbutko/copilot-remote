@@ -1249,10 +1249,9 @@ async function main(): Promise<void> {
     };
     const onPerm = async (req: PermissionRequest & { turnId?: string | null }) => {
       if (!ownsTurn(req.turnId)) return;
-      log.debug('onPerm called:', JSON.stringify(req).slice(0, 200));
       const p = (req as PermissionRequest & { permissionRequest?: PermissionRequest }).permissionRequest ?? req;
       const kind = p.kind as PermKind;
-      log.debug('Permission kind:', kind, 'autoApprove:', c.autoApprove[kind]);
+      log.debug('onPerm:', `kind=${kind}`, `autoApprove=${c.autoApprove[kind]}`);
 
       // Auto-approve if this kind is allowed
       if (c.autoApprove[kind]) {

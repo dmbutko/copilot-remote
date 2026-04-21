@@ -718,8 +718,6 @@ export class Session extends EventEmitter {
   }
 
   private async handlePermission(req: PermissionRequest): Promise<PermissionRequestResult> {
-    this.emit('permission_request', { ...(req as Record<string, unknown>), turnId: this.activeTurnId });
-    log.debug('Permission prompt (waiting for user):', req.kind);
     return new Promise<PermissionRequestResult>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | null = null;
       const handler = (approved: boolean) => {
@@ -729,7 +727,12 @@ export class Session extends EventEmitter {
         }
         resolve({ kind: approved ? 'approved' : 'denied-interactively-by-user' } as PermissionRequestResult);
       };
+      // Register listener BEFORE emitting permission_request so that synchronous
+      // auto-approve (which calls session.approve() → emit('permission_response'))
+      // can be caught. Previously the listener was registered after the emit,
+      // causing auto-approved permissions to fire into the void and time out.
       this.once('permission_response', handler);
+      this.emit('permission_request', { ...(req as Record<string, unknown>), turnId: this.activeTurnId });
       timer = setTimeout(() => {
         timer = null;
         this.off('permission_response', handler);
