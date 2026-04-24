@@ -1404,6 +1404,24 @@ async function main(): Promise<void> {
           await purgeSessionPersistence(chatId, session.sessionId ?? undefined);
         }
       }
+
+      // Auto-retry on "Session not found": the session was evicted from CLI memory
+      // but disk state is intact. Resume from disk and replay the user's message
+      // transparently instead of asking them to send it again.
+      if (isSessionNotFound && attempt < 2) {
+        markTimeline('retry_resume', 'session-not-found');
+        logPromptTimeline('retry_resume');
+        log.info(
+          '[prompt:retry-resume]',
+          `req=${promptTraceId}`,
+          `attempt=${attempt + 1}`,
+          `chat=${chatId}`,
+          `msg=${msgId}`,
+          'reason=session-evicted-from-memory',
+        );
+        return handlePrompt(chatId, msgId, prompt, attachments, attempt + 1, promptTraceId);
+      }
+
       if (errMsg.toLowerCase().includes('timeout')) {
         logPromptTimeline('timeout', firstStreamPhase ?? 'none');
         log.warn(
