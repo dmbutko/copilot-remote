@@ -22,7 +22,8 @@ export interface ConfigMenuDeps {
   workDir: (id: string) => string;
   bin: string;
   getSession: (chatId: string) => Promise<Session>;
-  purgeSessionPersistence: (chatId: string, explicitSessionId?: string) => Promise<void>;
+  suspendSession: (chatId: string) => void;
+  archiveSession: (chatId: string, explicitSessionId?: string) => Promise<void>;
 }
 
 function pfx(chatId: string, data: string): string {
@@ -278,7 +279,7 @@ export async function handleConfigCallback(
         });
         sessions.set(chatId, s);
       } catch {
-        await deps.purgeSessionPersistence(chatId, savedId);
+        deps.suspendSession(chatId);
         await deps.getSession(chatId);
       }
     }
@@ -424,7 +425,7 @@ export async function handleConfigCallback(
     const old = sessions.get(chatId);
     if (old?.alive) await old.disconnect();
     sessions.delete(chatId);
-    await deps.purgeSessionPersistence(chatId, old?.sessionId ?? undefined);
+    deps.suspendSession(chatId);
     await sendConfigMenu(chatId, deps, msgId);
     return true;
   }
@@ -442,7 +443,7 @@ export async function handleConfigCallback(
       await old.disconnect();
     }
     sessions.delete(chatId);
-    await deps.purgeSessionPersistence(chatId, old?.sessionId ?? undefined);
+    deps.suspendSession(chatId);
     log.info(`Mode: ${newMode} [${chatId}]`);
     await sendConfigMenu(chatId, deps, msgId);
     return true;

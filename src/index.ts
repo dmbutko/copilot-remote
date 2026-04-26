@@ -386,27 +386,79 @@ async function main(): Promise<void> {
 
   const workDir = (id: string) => workDirs.get(id) ?? config.workDir;
 
-  async function purgeSessionPersistence(chatId: string, explicitSessionId?: string): Promise<void> {
+  // ── Session lifecycle: suspend / archive ──
+
+  /** Kill in-memory session but preserve all disk state. Next message auto-resumes. */
+  function suspendSession(chatId: string): void {
+    const s = sessions.get(chatId);
+    if (s?.alive) {
+      try { s.kill(); } catch { /* ignore */ }
+    }
+    sessions.delete(chatId);
+    log.info('[session:suspend]', chatId);
+  }
+
+  /** Track consecutive resume failures to detect corrupt sessions. */
+  const resumeFailures = new Map<string, number>();
+
+  function recordResumeFailure(chatId: string): number {
+    const count = (resumeFailures.get(chatId) ?? 0) + 1;
+    resumeFailures.set(chatId, count);
+    return count;
+  }
+
+  function resetResumeFailures(chatId: string): void {
+    resumeFailures.delete(chatId);
+  }
+
+  /**
+   * Suspend + move entire session directory to archive. Session won't auto-resume;
+   * next message creates fresh. Old data preserved for forensic/query access.
+   */
+  async function archiveSession(chatId: string, explicitSessionId?: string): Promise<void> {
+    suspendSession(chatId);
     const ids = [
       ...new Set([...(explicitSessionId ? [explicitSessionId] : []), ...sessionStore.getSessionIds(chatId)]),
     ];
-    await Promise.allSettled(
-      ids.map(async (sessionId) => {
-        try {
-          await Session.deletePersistedSession(sessionId, {
-            binary: bin,
-            cliUrl: config.cliUrl,
-            githubToken: config.githubToken,
-            provider: config.provider,
-          });
-          log.info('Purged persisted session', sessionId, 'for', chatId);
-        } catch (e) {
-          log.debug('Failed to purge persisted session', sessionId, 'for', chatId, e);
-        }
-      }),
-    );
+    const copilotDir = path.join(process.env.HOME ?? '~', '.copilot', 'session-state');
+    const archiveDir = path.join(copilotDir, '.archive');
+    for (const sessionId of ids) {
+      const sessionDir = path.join(copilotDir, sessionId);
+      if (!fs.existsSync(sessionDir)) continue;
+      fs.mkdirSync(archiveDir, { recursive: true });
+      const archiveDest = path.join(archiveDir, `${sessionId}-${Date.now()}`);
+      try {
+        fs.renameSync(sessionDir, archiveDest);
+        log.info('[session:archive]', sessionId, '→', archiveDest);
+      } catch (e) {
+        log.warn('[session:archive] Failed to move', sessionId, e);
+      }
+    }
     sessionStore.delete(chatId);
-    // Keep workDir — it's a per-chat preference, not per-session
+    resetResumeFailures(chatId);
+    pruneArchives(ids, 5);
+  }
+
+  /** Keep only the latest `keepN` archives per session ID prefix. */
+  function pruneArchives(sessionIds: string[], keepN: number): void {
+    const copilotDir = path.join(process.env.HOME ?? '~', '.copilot', 'session-state');
+    const archiveDir = path.join(copilotDir, '.archive');
+    if (!fs.existsSync(archiveDir)) return;
+    for (const prefix of sessionIds) {
+      try {
+        const entries = fs.readdirSync(archiveDir)
+          .filter(name => name.startsWith(prefix + '-'))
+          .sort()
+          .reverse(); // newest first (timestamp suffix sorts lexically)
+        for (const old of entries.slice(keepN)) {
+          const fullPath = path.join(archiveDir, old);
+          fs.rmSync(fullPath, { recursive: true, force: true });
+          log.info('[session:prune]', old);
+        }
+      } catch (e) {
+        log.debug('[session:prune] error', prefix, e);
+      }
+    }
   }
 
   // Get or create session
@@ -636,12 +688,19 @@ async function main(): Promise<void> {
       try {
         await s.resume(saved.sessionId, buildSessionOptions(chatId, resumeCwd, saved.sessionId));
         sessionStore.touch(chatId);
+        resetResumeFailures(chatId);
         sessions.set(chatId, s);
         registerSessionListeners(s, chatId);
         log.info('Resumed session', saved.sessionId, 'for', chatId);
         return s;
       } catch (e) {
         log.debug('Resume failed for', saved.sessionId, '— trying next candidate/new session:', e);
+        const failures = recordResumeFailure(chatId);
+        if (failures >= 3) {
+          log.warn('[session:resume-guard] 3 consecutive failures, archiving', saved.sessionId);
+          await archiveSession(chatId, saved.sessionId);
+          break; // fall through to create fresh
+        }
         if (saved.sessionId !== deterministicSessionId) {
           sessionStore.delete(chatId);
         }
@@ -650,6 +709,7 @@ async function main(): Promise<void> {
 
     // Create new session with a deterministic ID derived from chatId[:threadId].
     await s.start(opts);
+    resetResumeFailures(chatId);
     restartManager.addWorkDir(workDir(chatId));
     if (s.sessionId) {
       sessionStore.set(chatId, {
@@ -678,7 +738,8 @@ async function main(): Promise<void> {
     workDir: (id: string) => workDir(id),
     bin,
     getSession,
-    purgeSessionPersistence,
+    suspendSession,
+    archiveSession,
   };
 
   // ── Prompt handler (streaming + reactions) ──
@@ -1371,7 +1432,7 @@ async function main(): Promise<void> {
           /* ignore */
         }
         sessions.delete(chatId);
-        await purgeSessionPersistence(chatId, session.sessionId ?? undefined);
+        suspendSession(chatId);
         await Session.resetSharedClient(`timeout-no-events req=${promptTraceId} chat=${chatId}`);
         log.info(
           '[prompt:retrying]',
@@ -1390,19 +1451,8 @@ async function main(): Promise<void> {
       const isPostDeltaTimeout = isTimeout && !hadNoCopilotEvents;
       const isSessionNotFound = errMsg.includes('Session not found');
       if (!isPostDeltaTimeout) {
-        try {
-          session.kill();
-        } catch {
-          /* ignore */
-        }
-        sessions.delete(chatId);
-        // Only purge disk state for genuinely unrecoverable errors (corruption, schema mismatch).
-        // "Session not found" means the CLI evicted the session from memory after idle — the
-        // events.jsonl on disk is still valid and session.resume can reload it. Purging here
-        // would destroy conversation history and make resume impossible.
-        if (!isSessionNotFound) {
-          await purgeSessionPersistence(chatId, session.sessionId ?? undefined);
-        }
+        // Suspend: kill in-memory but preserve disk for resume on next message.
+        suspendSession(chatId);
       }
 
       // Auto-retry on "Session not found": the session was evicted from CLI memory
@@ -1634,9 +1684,7 @@ async function main(): Promise<void> {
           sessionStore.setWorkDir(chatId, dir);
         }
         const old = sessions.get(chatId);
-        if (old?.alive) old.kill();
-        sessions.delete(chatId);
-        await purgeSessionPersistence(chatId, old?.sessionId ?? undefined); // Don't resume old session
+        await archiveSession(chatId, old?.sessionId ?? undefined);
         await getSession(chatId);
         await client.sendMessage(chatId, cmd === '/new' ? '🆕 New session.' : '✅ Ready in `' + workDir(chatId) + '`');
         break;
@@ -2060,20 +2108,16 @@ async function main(): Promise<void> {
             // Try steering first — tell the agent to stop
             await s.sendImmediate('STOP. The user has aborted this task. Do not continue. Acknowledge the abort.');
             await client.sendMessage(chatId, '🛑 Abort sent. Waiting for agent to stop...');
-            // Give it 5s to comply, then hard kill
+            // Give it 5s to comply, then hard kill + archive
             setTimeout(() => {
               if (s.alive) {
-                s.kill();
-                sessions.delete(chatId);
-                purgeSessionPersistence(chatId, s.sessionId ?? undefined).catch(() => {});
-                client.sendMessage(chatId, "💀 Hard killed — agent didn't stop.").catch(() => {});
+                archiveSession(chatId, s.sessionId ?? undefined).catch(() => {});
+                client.sendMessage(chatId, "💀 Hard killed — agent didn't stop. Session archived.").catch(() => {});
               }
             }, 5000);
           } catch {
-            s.kill();
-            sessions.delete(chatId);
-            await purgeSessionPersistence(chatId, s.sessionId ?? undefined);
-            await client.sendMessage(chatId, '🛑 Session killed.');
+            await archiveSession(chatId, s.sessionId ?? undefined);
+            await client.sendMessage(chatId, '🛑 Session killed and archived.');
           }
         } else {
           await client.sendMessage(chatId, '⚪ No active session.');
