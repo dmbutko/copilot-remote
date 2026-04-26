@@ -1347,13 +1347,14 @@ async function main(): Promise<void> {
             : p.kind === 'write'
               ? 'Write file'
               : p.kind;
+      const pAny = p as unknown as Record<string, unknown>;
       let detail =
         p.kind === 'shell'
-          ? '```\n' + String(p.fullCommandText ?? '').slice(0, 300) + '\n```'
+          ? '```\n' + String(pAny.fullCommandText ?? '').slice(0, 300) + '\n```'
           : p.kind === 'url'
-            ? '`' + String(p.url ?? '').slice(0, 200) + '`'
-            : (p.intention ?? '');
-      if (p.intention && p.kind !== detail) detail += '\n_' + p.intention + '_';
+            ? '`' + String(pAny.url ?? '').slice(0, 200) + '`'
+            : ((pAny.intention as string) ?? '');
+      if (pAny.intention && p.kind !== detail) detail += '\n_' + pAny.intention + '_';
       const pfx = (d: string) => '@' + chatId + '|' + d;
       const id = await client.sendButtons(chatId, icon + ' *' + title + '*\n' + detail, [
         [

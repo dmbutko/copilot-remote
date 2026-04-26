@@ -1,10 +1,12 @@
 // MCP server configuration — loading, merging, env expansion, persistence
 import * as fs from 'fs';
 import * as path from 'path';
-import type { MCPLocalServerConfig, MCPRemoteServerConfig, MCPServerConfig } from '@github/copilot-sdk';
+import type { MCPStdioServerConfig, MCPHTTPServerConfig, MCPServerConfig } from '@github/copilot-sdk';
 import { log } from './log.js';
 
-export type { MCPLocalServerConfig, MCPRemoteServerConfig, MCPServerConfig };
+export type { MCPStdioServerConfig, MCPHTTPServerConfig, MCPServerConfig };
+export type MCPLocalServerConfig = MCPStdioServerConfig;
+export type MCPRemoteServerConfig = MCPHTTPServerConfig;
 
 const CONFIG_DIR = path.join(process.env.HOME ?? '.', '.copilot-remote');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
