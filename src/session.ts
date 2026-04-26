@@ -725,7 +725,7 @@ export class Session extends EventEmitter {
           clearTimeout(timer);
           timer = null;
         }
-        resolve({ kind: approved ? 'approve-once' : 'reject' } as PermissionRequestResult);
+        resolve({ kind: approved ? 'approved' : 'denied-interactively-by-user' } as unknown as PermissionRequestResult);
       };
       // Register listener BEFORE emitting permission_request so that synchronous
       // auto-approve (which calls session.approve() → emit('permission_response'))
@@ -737,7 +737,7 @@ export class Session extends EventEmitter {
         timer = null;
         this.off('permission_response', handler);
         this.emit('permission_timeout');
-        resolve({ kind: 'user-not-available' } as PermissionRequestResult);
+        resolve({ kind: 'denied-interactively-by-user' } as unknown as PermissionRequestResult);
       }, 120_000);
     });
   }
