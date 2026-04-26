@@ -694,7 +694,7 @@ async function main(): Promise<void> {
         log.info('Resumed session', saved.sessionId, 'for', chatId);
         return s;
       } catch (e) {
-        log.debug('Resume failed for', saved.sessionId, '— trying next candidate/new session:', e);
+        log.warn('Resume failed for', saved.sessionId, '— trying next candidate/new session:', e);
         const failures = recordResumeFailure(chatId);
         if (failures >= 3) {
           log.warn('[session:resume-guard] 3 consecutive failures, archiving', saved.sessionId);
@@ -2588,8 +2588,17 @@ async function main(): Promise<void> {
       {
         resolveFileUrl: (incomingFileId) => client.getFileUrl!(incomingFileId),
         download: async (url) => {
-          const res = await fetch(url);
-          return new Uint8Array(await res.arrayBuffer());
+          // Retry up to 3 times — Azure VM has intermittent fetch failures
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              const res = await fetch(url);
+              return new Uint8Array(await res.arrayBuffer());
+            } catch {
+              if (attempt === 2) throw new Error('File download failed after 3 attempts');
+              await new Promise(r => setTimeout(r, 1000));
+            }
+          }
+          throw new Error('File download failed');
         },
         ensureTempDir: (dirPath) => {
           fs.mkdirSync(dirPath, { recursive: true });

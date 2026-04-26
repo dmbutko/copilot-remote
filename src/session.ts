@@ -882,7 +882,7 @@ export class Session extends EventEmitter {
     return (await this.session!.rpc.mode.get()).mode;
   }
   async compact(): Promise<CompactResponse> {
-    return this.session!.rpc.history.compact() as Promise<CompactResponse>;
+    return this.session!.rpc.compaction.compact() as Promise<CompactResponse>;
   }
   async startFleet(prompt?: string): Promise<unknown> {
     return this.session!.rpc.fleet.start({ prompt });
