@@ -809,7 +809,14 @@ async function main(): Promise<void> {
     let lastEdit = 0,
       timer: NodeJS.Timeout | null = null;
     let progressMaterializing = false;
-    const THROTTLE = useDraft ? 120 : 180; // keep updates snappy without spamming Telegram
+    const THROTTLE = useDraft ? 120 : (config as Record<string, unknown>).editThrottleMs
+      ? Number((config as Record<string, unknown>).editThrottleMs)
+      : 3000;
+    const RESEND_AFTER_MS = (config as Record<string, unknown>).resendAfterMs !== undefined
+      ? Number((config as Record<string, unknown>).resendAfterMs)
+      : 60_000;
+    let lastVisibleTransportAt = Date.now(); // tracks last successful send/edit for gap detection
+    let contentSnapshotLen = 0; // chars already shown in previous message(s)
     let sendingFirst = false; // mutex: prevent duplicate first-message sends
     let placeholderPrimed = false;
     let sessionReadyAt: number | undefined;
@@ -1047,8 +1054,18 @@ async function main(): Promise<void> {
         log.debug('[flush] sendMessage returned:', newMsgId);
         sendingFirst = false;
         streamMsgId = newMsgId;
+        lastVisibleTransportAt = Date.now();
         log.debug('Stream: new message', streamMsgId);
       } else {
+        // After a long idle gap (e.g. tool run), send as new message instead of
+        // editing the old one that's scrolled off screen.
+        if (RESEND_AFTER_MS > 0 && !useDraft && (Date.now() - lastVisibleTransportAt) > RESEND_AFTER_MS) {
+          log.info('[flush:split]', `chat=${chatId}`, `gap=${Date.now() - lastVisibleTransportAt}ms`, `oldMsg=${streamMsgId}`);
+          contentSnapshotLen = text.length; // remember what was in the old message
+          streamMsgId = null;
+          // Fall through — next flush will send a new message
+          return;
+        }
         log.debug('Stream: edit message', streamMsgId);
         // Use raw edit (plain text, no markdown→HTML) for streaming — fast path
         const [cid] = resolveKey(chatId);
@@ -1060,6 +1077,7 @@ async function main(): Promise<void> {
         editPromise
           .then(() => {
             noteTelegramCall(tgStart, true);
+            lastVisibleTransportAt = Date.now();
             sendTypingSafe();
           })
           .catch((e) => {
@@ -1519,6 +1537,11 @@ async function main(): Promise<void> {
 
       const final = res.content;
       log.debug('[finalize] streamMsgId:', streamMsgId, 'final length:', final.length);
+      // If there's been a long gap, finalize as a new message instead of editing the old one
+      if (streamMsgId && RESEND_AFTER_MS > 0 && !useDraft && (Date.now() - lastVisibleTransportAt) > RESEND_AFTER_MS) {
+        log.info('[finalize:split]', `chat=${chatId}`, `gap=${Date.now() - lastVisibleTransportAt}ms`);
+        streamMsgId = null;
+      }
       const tgStart = performance.now();
       const finalization = await finalizeStreamResponse({
         client,
