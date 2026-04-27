@@ -377,7 +377,10 @@ export class TelegramClient implements Client {
       } catch {
         /* ignore handler errors */
       }
-      await ctx.answerCallbackQuery();
+      // Ack immediately after handler completes. If the handler already acked, Telegram
+      // silently ignores the duplicate. Only late acks (>30s) cause "query is too old" errors,
+      // so we keep this as a safety net for handlers that don't ack themselves.
+      await ctx.answerCallbackQuery().catch(() => {});
     });
 
     // Inline queries

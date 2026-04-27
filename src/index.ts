@@ -790,14 +790,11 @@ async function main(): Promise<void> {
     };
     // Show typing immediately — session creation can take seconds
     sendTypingSafe();
-    const typingInterval = setInterval(() => sendTypingSafe(), 3000);
+    let typingInterval: ReturnType<typeof setInterval> | null = setInterval(() => sendTypingSafe(), 3000);
     const c = cfg(chatId);
-    const streamAllActivity = true;
-    const showThinking = streamAllActivity || c.showThinking;
-    const showTools = streamAllActivity || c.showTools;
+    const showThinking = c.showThinking;
+    const showTools = c.showTools;
     let streamMsgId: number | null = null;
-    let draftId: number | null = null;
-    let useDraft = !!client.sendDraft; // try draft mode if client supports it
     let thinkingText = '',
       responseText = '';
     let thinkingLogText = '';
@@ -806,22 +803,9 @@ async function main(): Promise<void> {
     let activeToolStatus = '';
     const activeToolStatuses = new ToolStatusState();
     const activeToolCallIds = new Set<string>();
-    let lastEdit = 0,
-      timer: NodeJS.Timeout | null = null;
     let progressMaterializing = false;
-    const isGroup = chatId.startsWith('-');
-    const configThrottleMs = (config as Record<string, unknown>).editThrottleMs
-      ? Number((config as Record<string, unknown>).editThrottleMs) : undefined;
-    const getThrottle = () => useDraft ? 120 : (configThrottleMs ?? (isGroup ? 3000 : 500));
-    const RESEND_AFTER_MS = (config as Record<string, unknown>).resendAfterMs !== undefined
-      ? Number((config as Record<string, unknown>).resendAfterMs)
-      : 60_000;
-    const STREAM_SEND_TIMEOUT = 30_000;
-    const STREAM_EDIT_TIMEOUT = 15_000;
-    let lastVisibleTransportAt = Date.now();
-    let contentSnapshotLen = 0;
-    let sendingFirst = false; // mutex: prevent duplicate first-message sends
-    let placeholderPrimed = false;
+    const PROGRESS_INTERVAL_MS = 30_000; // max one progress update per 30s
+    let lastProgressAt = 0;
     let sessionReadyAt: number | undefined;
     let firstDeltaAt: number | null = null;
     let firstVisibleAt: number | null = null;
@@ -838,88 +822,62 @@ async function main(): Promise<void> {
       }
     };
 
-    const display = () => {
+    // ── Placeholder → Status → Final model ──
+    // Instead of streaming edits, we: send one placeholder, update status rarely, send final once.
+
+    const progressDisplay = () => {
       const p: string[] = [];
       if (intentText) p.push('*' + intentText + '*');
-      if (thinkingText && showThinking) {
-        const italicLines = thinkingText
-          .trim()
-          .split('\n')
-          .map((line) => (line.trim() ? '_' + line.replace(/_/g, '\\_') + '_' : ''))
-          .join('\n');
-        p.push(italicLines);
-      }
-      if (toolLines.length) p.push(toolLines.join('\n'));
-      if (activeToolStatus && !responseText) p.push('⏳ ' + activeToolStatus);
-      if (responseText) p.push(responseText);
-      return p.join('\n\n');
+      if (toolLines.length && showTools) p.push(toolLines.join('\n'));
+      if (activeToolStatus) p.push('⏳ ' + activeToolStatus);
+      return p.join('\n\n') || '⏳ Working…';
     };
 
-    const primeStreamSurface = async () => {
-      if (placeholderPrimed) return;
-      const text = display();
-      if (!text.trim()) return;
-
-      if (useDraft && client.sendDraft) {
-        if (!draftId) draftId = client.allocateDraftId!();
-        const tgStart = performance.now();
-        const result = await client.sendDraft(chatId, draftId, text, responseMessageOpts);
-        noteTelegramCall(tgStart, result === 'ok');
-        if (result === 'ok') {
-          placeholderPrimed = true;
-          markTimeline('placeholder', 'draft');
-          log.debug('Stream: primed draft', draftId, 'for', chatId);
-          return;
-        }
-        if (result === 'transient') {
-          // Network/timeout: request may have actually reached Telegram. Falling
-          // back to sendMessage would risk a duplicate. Skip priming this tick;
-          // next stream chunk will retry the draft.
-          return;
-        }
-        useDraft = false;
-      }
-
-      const tgStart = performance.now();
-      const sentMsgId = await client.sendMessage(chatId, text, responseMessageOpts);
-      noteTelegramCall(tgStart, sentMsgId !== null);
-      streamMsgId = sentMsgId;
-      placeholderPrimed = streamMsgId !== null;
-      if (streamMsgId !== null) markTimeline('placeholder', 'message');
-      log.debug('Stream: primed message', streamMsgId, 'for', chatId);
-    };
-
-    const materializeProgressSurface = async () => {
-      if (streamMsgId || progressMaterializing || sendingFirst || responseText) return;
-      const text = display();
-      if (!text.trim()) return;
-
+    const sendPlaceholder = async () => {
+      if (streamMsgId || progressMaterializing) return;
       progressMaterializing = true;
       try {
-        useDraft = false;
-        if (timer) {
-          clearTimeout(timer);
-          timer = null;
-        }
-        lastEdit = Date.now();
+        const text = progressDisplay();
         const tgStart = performance.now();
-        const sentMsgId = await client.sendMessage(chatId, text, responseMessageOpts);
+        const sentMsgId = await client.sendMessage(chatId, text, {
+          ...responseMessageOpts,
+          disableNotification: true,
+        });
         noteTelegramCall(tgStart, sentMsgId !== null);
         streamMsgId = sentMsgId;
-        placeholderPrimed = streamMsgId !== null;
         if (streamMsgId !== null) {
           markTimeline('progress_visible', 'message');
-          log.debug('Stream: materialized progress message', streamMsgId, 'for', chatId);
+          lastProgressAt = Date.now();
+          log.debug('Placeholder sent:', streamMsgId, 'for', chatId);
         }
       } finally {
         progressMaterializing = false;
       }
     };
 
+    const updateProgress = async () => {
+      if (!streamMsgId) {
+        await sendPlaceholder();
+        return;
+      }
+      if (Date.now() - lastProgressAt < PROGRESS_INTERVAL_MS) return;
+      lastProgressAt = Date.now();
+      const text = progressDisplay();
+      const [cid] = resolveKey(chatId);
+      const tc = client as unknown as { editMessageRaw?: (c: string, m: number, t: string) => Promise<void> };
+      const tgStart = performance.now();
+      const editFn = tc.editMessageRaw
+        ? tc.editMessageRaw.call(client, cid, streamMsgId, text)
+        : client.editMessage(chatId, streamMsgId, text);
+      editFn
+        .then(() => noteTelegramCall(tgStart))
+        .catch((e) => log.debug('Progress edit failed:', e));
+    };
+
     let session: Session;
     try {
       if (!sessions.get(chatId)?.alive) {
-        await primeStreamSurface();
+        await sendPlaceholder();
       }
       session = await getSession(chatId);
       sessionReadyAt = performance.now();
@@ -969,6 +927,7 @@ async function main(): Promise<void> {
     // Keep relay semantics simple: queue by default, and only steer an in-flight turn
     // when the user explicitly opts into immediate mode.
     if (session.busy && c.messageMode === 'immediate') {
+      if (typingInterval) { clearInterval(typingInterval); typingInterval = null; }
       const react = c.showReactions
         ? (e: string) => {
             client.setReaction(chatId, msgId, e).catch(() => {});
@@ -984,129 +943,22 @@ async function main(): Promise<void> {
       }
       return;
     }
-    client.sendTyping(chatId);
-    await primeStreamSurface();
+    // Send placeholder immediately so user knows we're working
+    await sendPlaceholder();
+    // Stop typing interval only if placeholder is visible
+    if (streamMsgId && typingInterval) {
+      clearInterval(typingInterval);
+      typingInterval = null;
+    }
     const turnReservation = session.reserveTurn();
     const react = c.showReactions
       ? (e: string) => {
           client
             .setReaction(chatId, msgId, e)
-            .then(() => sendTypingSafe())
             .catch(() => {});
         }
       : () => {};
     react(LIFECYCLE_REACTIONS.received);
-    sendTypingSafe();
-
-    // Minimum chars before sending first streaming message.
-    // Prevents premature push notifications (user sees "I" before the full sentence).
-    // Pattern adapted from OpenClaw's DRAFT_MIN_INITIAL_CHARS (MIT, github.com/AustenStone/openclaw)
-    const MIN_INITIAL_CHARS = 1;
-
-    const flush = async () => {
-      timer = null;
-      lastEdit = Date.now();
-      const text = display();
-      if (!text.trim()) return;
-      log.debug(
-        '[flush]',
-        'text:',
-        text.length,
-        'streamMsgId:',
-        streamMsgId,
-        'sendingFirst:',
-        sendingFirst,
-        'useDraft:',
-        useDraft,
-      );
-
-      // Try native draft streaming first
-      if (useDraft && client.sendDraft) {
-        if (!draftId) draftId = client.allocateDraftId!();
-        const tgStart = performance.now();
-        const result = await client.sendDraft(chatId, draftId, text, responseMessageOpts);
-        noteTelegramCall(tgStart);
-        if (result === 'ok') return;
-        if (result === 'transient') {
-          // Skip this chunk to avoid creating a duplicate via sendMessage when
-          // the draft request may have actually reached Telegram. Next chunk retries.
-          return;
-        }
-        useDraft = false; // permanent: fall back to edit-in-place
-      }
-
-      // Fallback: send then edit
-      if (!streamMsgId) {
-        if (progressMaterializing) {
-          log.debug('[flush] blocked by progressMaterializing');
-          return;
-        }
-        if (sendingFirst) {
-          log.debug('[flush] blocked by sendingFirst mutex');
-          return;
-        }
-        if (text.length < MIN_INITIAL_CHARS) {
-          log.debug('[flush] text too short:', text.length);
-          return;
-        }
-        sendingFirst = true;
-        log.debug('[flush] sending first message, text:', text.length);
-        const tgStart = performance.now();
-        const newMsgId = await client.sendMessage(chatId, text, {
-          ...responseMessageOpts,
-          disableNotification: true,
-          timeoutMs: STREAM_SEND_TIMEOUT,
-        });
-        noteTelegramCall(tgStart, newMsgId !== null);
-        log.debug('[flush] sendMessage returned:', newMsgId);
-        sendingFirst = false;
-        if (newMsgId === null) {
-          // Timeout or failure — re-arm so next chunk retries
-          schedEdit();
-          return;
-        }
-        streamMsgId = newMsgId;
-        lastVisibleTransportAt = Date.now();
-        log.debug('Stream: new message', streamMsgId);
-      } else {
-        // After a long idle gap (e.g. tool run), send as new message instead of
-        // editing the old one that's scrolled off screen.
-        if (RESEND_AFTER_MS > 0 && !useDraft && (Date.now() - lastVisibleTransportAt) > RESEND_AFTER_MS) {
-          log.info('[flush:split]', `chat=${chatId}`, `gap=${Date.now() - lastVisibleTransportAt}ms`, `oldMsg=${streamMsgId}`);
-          contentSnapshotLen = text.length; // remember what was in the old message
-          streamMsgId = null;
-          // Fall through — next flush will send a new message
-          return;
-        }
-        log.debug('Stream: edit message', streamMsgId);
-        // Use raw edit (plain text, no markdown→HTML) for streaming — fast path
-        const [cid] = resolveKey(chatId);
-        const tc = client as unknown as { editMessageRaw?: (c: string, m: number, t: string, timeout?: number) => Promise<void> };
-        const tgStart = performance.now();
-        const editPromise = tc.editMessageRaw
-          ? tc.editMessageRaw.call(client, cid, streamMsgId, text, STREAM_EDIT_TIMEOUT)
-          : client.editMessage(chatId, streamMsgId, text);
-        editPromise
-          .then(() => {
-            noteTelegramCall(tgStart, true);
-            lastVisibleTransportAt = Date.now();
-            sendTypingSafe();
-          })
-          .catch((e) => {
-            log.debug('Stream edit failed:', e);
-          });
-      }
-    };
-
-    const schedEdit = () => {
-      if (!timer)
-        timer = setTimeout(
-          () => {
-            flush().catch(() => {});
-          },
-          Math.max(0, getThrottle() - (Date.now() - lastEdit)),
-        );
-    };
 
     const noteFirstStreamEvent = (phase: 'thinking' | 'response', chunk: string) => {
       if (firstStreamPhase) return;
@@ -1171,9 +1023,7 @@ async function main(): Promise<void> {
       thinkingLogText += text;
       logCopilotChunk('thinking', turnId, text);
       if (!showThinking) return;
-      if (!thinkingText) react(LIFECYCLE_REACTIONS.thinking);
       thinkingText += text;
-      schedEdit(); // thinking shows inline in the main streaming message
     };
 
     const onDelta = ({ turnId, text }: SessionStreamEvent) => {
@@ -1184,9 +1034,7 @@ async function main(): Promise<void> {
       if (thinkingText) {
         thinkingText = '';
       }
-      if (!responseText) react(LIFECYCLE_REACTIONS.writing);
       responseText += text;
-      schedEdit();
     };
     const toolStartTimes = new Map<string, number>();
     const toolLineIndexByCallId = new Map<string, number>();
@@ -1201,9 +1049,8 @@ async function main(): Promise<void> {
       if (summary.activeToolStatus && !activeToolStatus) {
         activeToolStatus = summary.activeToolStatus;
       }
-      if (summary.intentText || summary.thinkingSummary || summary.activeToolStatus) {
-        void materializeProgressSurface();
-        schedEdit();
+      if (summary.intentText || summary.activeToolStatus) {
+        void updateProgress();
       }
     };
     const onThinkSummary = ({ turnId, text }: SessionStreamEvent) => {
@@ -1212,8 +1059,6 @@ async function main(): Promise<void> {
       const summary = text.trim();
       if (!summary) return;
       thinkingText = summary;
-      void materializeProgressSurface();
-      schedEdit();
     };
     const onToolStart = (t: ToolEvent & { turnId?: string | null }) => {
       if (!ownsTurn(t.turnId)) return;
@@ -1221,39 +1066,23 @@ async function main(): Promise<void> {
       if (t.toolCallId) activeToolCallIds.add(t.toolCallId);
       // ask_user has its own UI (buttons/reply prompt) — suppress from tool display
       if (t.toolName === 'ask_user') return;
-      sendTypingSafe();
-      // React based on tool type
-      const toolReaction =
-        t.toolName === 'web_fetch' || t.toolName === 'web_search'
-          ? LIFECYCLE_REACTIONS.web
-          : t.toolName === 'bash'
-            ? LIFECYCLE_REACTIONS.command
-            : t.toolName === 'edit_file' || t.toolName === 'write_file' || t.toolName === 'create_file'
-              ? LIFECYCLE_REACTIONS.file_edit
-              : t.toolName === 'grep_search' || t.toolName === 'search' || t.toolName === 'glob'
-                ? LIFECYCLE_REACTIONS.search
-                : LIFECYCLE_REACTIONS.tool_call;
-      react(toolReaction);
-      // report_intent: show as headline, not a tool line
+      // report_intent: update internal state for progress display
       if (t.toolName === 'report_intent') {
         const intent = t.arguments?.intent ?? t.arguments?.message ?? '';
         if (intent) {
           intentText = String(intent);
-          schedEdit();
+          void updateProgress();
         }
         return;
       }
       const statusSummary = formatToolStatus(t.toolName, t.arguments);
-      // Always set active tool status (visible even with showTools off)
       activeToolStatuses.set(t.toolCallId, statusSummary.statusLine);
       activeToolStatus = statusSummary.statusLine;
-      void materializeProgressSurface();
-      schedEdit();
+      void updateProgress();
 
       if (!showTools) return;
       const lineIndex = toolLines.push(statusSummary.statusLine) - 1;
       if (t.toolCallId) toolLineIndexByCallId.set(t.toolCallId, lineIndex);
-      schedEdit();
     };
     const toolOutputBuffers = new Map<string, string[]>();
     const MAX_PARTIAL_LINES = 3;
@@ -1264,20 +1093,16 @@ async function main(): Promise<void> {
       if (!text.trim()) return;
       const key = t.toolCallId ?? t.toolName;
       const lines = toolOutputBuffers.get(key) ?? [];
-      // Append new lines, keep only the last N
       for (const line of text.split('\n')) {
         if (line.trim()) lines.push(line);
       }
       const tail = lines.slice(-MAX_PARTIAL_LINES);
       toolOutputBuffers.set(key, tail);
-      // Update the last tool line with partial output
       const lineIndex = t.toolCallId ? toolLineIndexByCallId.get(t.toolCallId) : undefined;
       const targetIndex = lineIndex ?? (toolLines.length ? toolLines.length - 1 : -1);
       if (targetIndex >= 0) {
-        const baseLine = toolLines[targetIndex].split('\n')[0]; // strip prior partial output
+        const baseLine = toolLines[targetIndex].split('\n')[0];
         toolLines[targetIndex] = baseLine + '\n```\n' + tail.join('\n') + '\n```';
-        void materializeProgressSurface();
-        schedEdit();
       }
     };
     const onSubagentStart = (event: SubagentStartEvent) => {
@@ -1293,8 +1118,7 @@ async function main(): Promise<void> {
           toolLines.push(status.statusLine);
         }
       }
-      void materializeProgressSurface();
-      schedEdit();
+      void updateProgress();
     };
     const onTurnStart = ({ turnId }: { turnId: string | null }) => {
       if (!ownsTurn(turnId)) return;
@@ -1303,20 +1127,17 @@ async function main(): Promise<void> {
     };
     const onToolEnd = (t: ToolEvent & { turnId?: string | null }) => {
       if (!ownsTurn(t.turnId)) return;
-      // Clear partial output buffer for this tool
       const key = t.toolCallId ?? t.toolName;
       toolOutputBuffers.delete(key);
       if (t.toolCallId) activeToolCallIds.delete(t.toolCallId);
       activeToolStatuses.delete(t.toolCallId);
       activeToolStatus =
         activeToolStatuses.current() || (activeToolCallIds.size === 0 && !responseText ? '🧠 Reviewing results' : '');
-      sendTypingSafe(); // re-send typing (Telegram cancels on edit)
       if (t.toolName === 'report_intent' || t.toolName === 'ask_user') return;
       if (!showTools || !toolLines.length) return;
       const lineIndex = t.toolCallId ? toolLineIndexByCallId.get(t.toolCallId) : undefined;
       const targetIndex = lineIndex ?? toolLines.length - 1;
       if (targetIndex < 0 || targetIndex >= toolLines.length) return;
-      // Strip partial output from tool line before adding completion mark
       toolLines[targetIndex] = toolLines[targetIndex].split('\n')[0];
       const elapsed = t.toolCallId ? toolStartTimes.get(t.toolCallId) : undefined;
       const duration = elapsed ? ` ${((Date.now() - elapsed) / 1000).toFixed(1)}s` : '';
@@ -1327,8 +1148,6 @@ async function main(): Promise<void> {
       toolLines[targetIndex] +=
         (t.success !== false ? ' ✓' : ' ✗') + duration + (shouldAppendCompletionDetail ? ` — ${completionDetail}` : '');
       if (t.toolCallId) toolLineIndexByCallId.delete(t.toolCallId);
-      void materializeProgressSurface();
-      schedEdit();
 
       // Send any generated images as Telegram photos
       if (t.images?.length && client.sendPhoto) {
@@ -1405,10 +1224,6 @@ async function main(): Promise<void> {
     // Persistent listeners (usage, hooks, notifications) registered once in registerSessionListeners()
 
     const cleanup = () => {
-      if (timer) {
-        clearTimeout(timer);
-        timer = null;
-      }
       session.off('assistant_plan', onAssistantPlan);
       session.off('thinking_summary', onThinkSummary);
       session.off('thinking_event', onThink);
@@ -1549,11 +1364,6 @@ async function main(): Promise<void> {
 
       const final = res.content;
       log.debug('[finalize] streamMsgId:', streamMsgId, 'final length:', final.length);
-      // If there's been a long gap, finalize as a new message instead of editing the old one
-      if (streamMsgId && RESEND_AFTER_MS > 0 && !useDraft && (Date.now() - lastVisibleTransportAt) > RESEND_AFTER_MS) {
-        log.info('[finalize:split]', `chat=${chatId}`, `gap=${Date.now() - lastVisibleTransportAt}ms`);
-        streamMsgId = null;
-      }
       const tgStart = performance.now();
       const finalization = await finalizeStreamResponse({
         client,
@@ -1562,9 +1372,9 @@ async function main(): Promise<void> {
         final,
         responseMessageOpts,
       });
-      if (finalization === 'edited') log.debug('[finalize] materialize edit msgId:', streamMsgId);
+      if (finalization === 'edited') log.debug('[finalize] edited placeholder msgId:', streamMsgId);
       else if (finalization === 'resent') log.debug('[finalize] multi-chunk: delete + resend');
-      else log.debug('[finalize] no streamMsgId, sending fresh');
+      else log.debug('[finalize] no placeholder, sending fresh');
       noteTelegramCall(tgStart, true);
       markTimeline('done', `final=${finalization}`);
       if (thinkingLogText.trim()) {
