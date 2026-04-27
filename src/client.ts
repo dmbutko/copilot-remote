@@ -5,6 +5,8 @@ export interface MessageOptions {
   replyTo?: number;
   disableLinkPreview?: boolean;
   threadId?: number;
+  disableNotification?: boolean;
+  timeoutMs?: number;
 }
 
 export interface Button {

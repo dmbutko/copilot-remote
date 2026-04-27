@@ -123,7 +123,7 @@ describe('handleIncomingFileUpload', () => {
         chatId: 'chat-1',
         msgId: 1,
         prompt: 'Describe this image.',
-        attachments: [{ type: 'file', path: `${FILE_INTAKE_TEMP_DIR}/diagram.png` }],
+        attachments: [{ type: 'file', path: `${FILE_INTAKE_TEMP_DIR}/diagram.png`, displayName: 'diagram.png' }],
       },
     ]);
   });

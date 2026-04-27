@@ -24,6 +24,17 @@ const DRAFT_ID_MAX = 2_147_483_647;
 const DRAFT_REQUEST_TIMEOUT_MS = 1200;
 let nextDraftId = 0;
 
+/** Abort a promise after `ms` using AbortController. Throws AbortError on timeout. */
+async function withAbortTimeout<T>(fn: (signal?: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ms);
+  try {
+    return await fn(ac.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 type MyContext = HydrateFlavor<FileFlavor<Context>>;
 
 export interface TelegramConfig {
@@ -499,28 +510,39 @@ export class TelegramClient implements Client {
     if (opts?.replyTo) extra.reply_parameters = { message_id: opts.replyTo, allow_sending_without_reply: true };
     if (opts?.disableLinkPreview) extra.link_preview_options = { is_disabled: true };
     if (opts?.threadId) extra.message_thread_id = opts.threadId;
+    if (opts?.disableNotification) extra.disable_notification = true;
+
+    const timeoutMs = opts?.timeoutMs;
+    const rawApi = this.raw;
+    const callApi = async (params: Record<string, unknown>, signal?: AbortSignal) => {
+      return rawApi['sendMessage'](params as Parameters<typeof rawApi['sendMessage']>[0], signal);
+    };
 
     for (const chunk of chunks) {
       try {
-        const res = await this.raw['sendMessage']({
-          chat_id: chatId,
-          ...extra,
-          text: chunk.html,
-          parse_mode: 'HTML',
-        });
+        const params = { chat_id: chatId, ...extra, text: chunk.html, parse_mode: 'HTML' as const };
+        const res = timeoutMs
+          ? await withAbortTimeout(() => callApi(params), timeoutMs)
+          : await callApi(params);
         lastMsgId = (res as { message_id?: number })?.message_id ?? null;
       } catch (e) {
+        if ((e as Error)?.name === 'AbortError') {
+          log.warn('[Telegram API TIMEOUT]', `method=sendMessage`, `chat=${chatId}`, `timeout=${timeoutMs}ms`);
+          return null;
+        }
         log.debug('[Telegram] sendMessage HTML failed:', (e as Error)?.message ?? e);
         // Fallback: send as plain text if HTML fails
         try {
-          const res = await this.raw['sendMessage']({
-            chat_id: chatId,
-            ...extra,
-            text: chunk.text,
-            parse_mode: undefined,
-          });
+          const params = { chat_id: chatId, ...extra, text: chunk.text, parse_mode: undefined };
+          const res = timeoutMs
+            ? await withAbortTimeout(() => callApi(params), timeoutMs)
+            : await callApi(params);
           lastMsgId = (res as { message_id?: number })?.message_id ?? null;
         } catch (e2) {
+          if ((e2 as Error)?.name === 'AbortError') {
+            log.warn('[Telegram API TIMEOUT]', `method=sendMessage(plain)`, `chat=${chatId}`, `timeout=${timeoutMs}ms`);
+            return null;
+          }
           log.debug('[Telegram] sendMessage plain text also failed:', (e2 as Error)?.message ?? e2);
         }
       }
@@ -564,7 +586,7 @@ export class TelegramClient implements Client {
   }
 
   /** Lightweight edit for streaming — sends plain text, skips markdown→HTML pipeline. */
-  async editMessageRaw(chatId: string, msgId: number, text: string): Promise<void> {
+  async editMessageRaw(chatId: string, msgId: number, text: string, timeoutMs?: number): Promise<void> {
     const truncated = text.length > MAX_MESSAGE_LENGTH ? text.slice(0, MAX_MESSAGE_LENGTH - 4) + ' ...' : text;
     log.info(
       '[Telegram TX EDIT RAW]',
@@ -573,13 +595,20 @@ export class TelegramClient implements Client {
       `text=${JSON.stringify(summarizeTextForLog(truncated))}`,
     );
     try {
-      await this.raw['editMessageText']({
-        chat_id: chatId,
-        message_id: msgId,
-        text: truncated,
-        parse_mode: undefined,
-      });
+      const params = { chat_id: chatId, message_id: msgId, text: truncated, parse_mode: undefined as undefined };
+      if (timeoutMs) {
+        await withAbortTimeout(
+          (signal) => this.raw['editMessageText'](params as Parameters<typeof this.raw['editMessageText']>[0], signal) as Promise<unknown>,
+          timeoutMs,
+        );
+      } else {
+        await this.raw['editMessageText'](params as Parameters<typeof this.raw['editMessageText']>[0]);
+      }
     } catch (e) {
+      if ((e as Error)?.name === 'AbortError') {
+        log.warn('[Telegram API TIMEOUT]', `method=editMessageRaw`, `chat=${chatId}`, `msg=${msgId}`, `timeout=${timeoutMs}ms`);
+        return;
+      }
       log.debug('[Telegram] editMessageRaw failed:', (e as Error)?.message ?? e);
     }
   }

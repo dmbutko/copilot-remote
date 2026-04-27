@@ -809,14 +809,17 @@ async function main(): Promise<void> {
     let lastEdit = 0,
       timer: NodeJS.Timeout | null = null;
     let progressMaterializing = false;
-    const THROTTLE = useDraft ? 120 : (config as Record<string, unknown>).editThrottleMs
-      ? Number((config as Record<string, unknown>).editThrottleMs)
-      : 3000;
+    const isGroup = chatId.startsWith('-');
+    const configThrottleMs = (config as Record<string, unknown>).editThrottleMs
+      ? Number((config as Record<string, unknown>).editThrottleMs) : undefined;
+    const getThrottle = () => useDraft ? 120 : (configThrottleMs ?? (isGroup ? 3000 : 500));
     const RESEND_AFTER_MS = (config as Record<string, unknown>).resendAfterMs !== undefined
       ? Number((config as Record<string, unknown>).resendAfterMs)
       : 60_000;
-    let lastVisibleTransportAt = Date.now(); // tracks last successful send/edit for gap detection
-    let contentSnapshotLen = 0; // chars already shown in previous message(s)
+    const STREAM_SEND_TIMEOUT = 30_000;
+    const STREAM_EDIT_TIMEOUT = 15_000;
+    let lastVisibleTransportAt = Date.now();
+    let contentSnapshotLen = 0;
     let sendingFirst = false; // mutex: prevent duplicate first-message sends
     let placeholderPrimed = false;
     let sessionReadyAt: number | undefined;
@@ -1049,10 +1052,19 @@ async function main(): Promise<void> {
         sendingFirst = true;
         log.debug('[flush] sending first message, text:', text.length);
         const tgStart = performance.now();
-        const newMsgId = await client.sendMessage(chatId, text, responseMessageOpts);
+        const newMsgId = await client.sendMessage(chatId, text, {
+          ...responseMessageOpts,
+          disableNotification: true,
+          timeoutMs: STREAM_SEND_TIMEOUT,
+        });
         noteTelegramCall(tgStart, newMsgId !== null);
         log.debug('[flush] sendMessage returned:', newMsgId);
         sendingFirst = false;
+        if (newMsgId === null) {
+          // Timeout or failure — re-arm so next chunk retries
+          schedEdit();
+          return;
+        }
         streamMsgId = newMsgId;
         lastVisibleTransportAt = Date.now();
         log.debug('Stream: new message', streamMsgId);
@@ -1069,10 +1081,10 @@ async function main(): Promise<void> {
         log.debug('Stream: edit message', streamMsgId);
         // Use raw edit (plain text, no markdown→HTML) for streaming — fast path
         const [cid] = resolveKey(chatId);
-        const tc = client as unknown as { editMessageRaw?: (c: string, m: number, t: string) => Promise<void> };
+        const tc = client as unknown as { editMessageRaw?: (c: string, m: number, t: string, timeout?: number) => Promise<void> };
         const tgStart = performance.now();
         const editPromise = tc.editMessageRaw
-          ? tc.editMessageRaw.call(client, cid, streamMsgId, text)
+          ? tc.editMessageRaw.call(client, cid, streamMsgId, text, STREAM_EDIT_TIMEOUT)
           : client.editMessage(chatId, streamMsgId, text);
         editPromise
           .then(() => {
@@ -1092,7 +1104,7 @@ async function main(): Promise<void> {
           () => {
             flush().catch(() => {});
           },
-          Math.max(0, THROTTLE - (Date.now() - lastEdit)),
+          Math.max(0, getThrottle() - (Date.now() - lastEdit)),
         );
     };
 
