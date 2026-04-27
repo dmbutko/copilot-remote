@@ -145,6 +145,8 @@ Like Claude Remote Control, the important bit is that the local process must sta
   "showTools": true,
   "showReactions": true,
   "messageMode": "enqueue",
+  "uploadDir": "/tmp/copilot-remote-files",
+  "systemInstructions": "Keep answers under 2000 chars. Bullet points over paragraphs.",
   "autoApprove": {
     "read": true,
     "shell": false,

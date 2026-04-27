@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { FileAttachment } from '../session.js';
-import { FILE_INTAKE_TEMP_DIR, handleIncomingFileUpload, isImageFile, isTranscribableAudio } from '../file-intake.js';
+import { DEFAULT_UPLOAD_DIR, handleIncomingFileUpload, isImageFile, isTranscribableAudio } from '../file-intake.js';
 
 function createDeps(overrides: Partial<Parameters<typeof handleIncomingFileUpload>[1]> = {}) {
   const sentMessages: Array<{ chatId: string; text: string }> = [];
@@ -95,15 +95,16 @@ describe('handleIncomingFileUpload', () => {
       deps,
     );
 
-    assert.deepEqual(directories, [FILE_INTAKE_TEMP_DIR]);
+    assert.ok(directories[0]?.includes('chat-1'));
     assert.equal(writes.length, 1);
-    assert.equal(writes[0]?.path, `${FILE_INTAKE_TEMP_DIR}/voice.ogg`);
+    assert.ok(writes[0]?.path.includes('chat-1'));
+    assert.ok(writes[0]?.path.includes('voice'));
     assert.deepEqual(prompts, [
       {
         chatId: 'chat-1',
         msgId: 1,
-        prompt: `What did I say?\n\n[Attached file: ${FILE_INTAKE_TEMP_DIR}/voice.ogg]`,
-        attachments: undefined,
+        prompt: `What did I say?\n\n[Attached file: ${writes[0]?.path}]`,
+        attachments: [{ type: 'file', path: writes[0]?.path, displayName: 'voice.ogg' }],
       },
     ]);
     assert.equal(debugLogs.length, 1);
@@ -111,21 +112,19 @@ describe('handleIncomingFileUpload', () => {
   });
 
   it('routes image uploads through SDK attachments for vision flows', async () => {
-    const { deps, prompts } = createDeps();
+    const { deps, prompts, writes } = createDeps();
 
     await handleIncomingFileUpload(
       { fileId: 'file-1', fileName: 'diagram.png', caption: '', chatId: 'chat-1', msgId: 1 },
       deps,
     );
 
-    assert.deepEqual(prompts, [
-      {
-        chatId: 'chat-1',
-        msgId: 1,
-        prompt: 'Describe this image.',
-        attachments: [{ type: 'file', path: `${FILE_INTAKE_TEMP_DIR}/diagram.png`, displayName: 'diagram.png' }],
-      },
-    ]);
+    assert.equal(prompts.length, 1);
+    assert.equal(prompts[0]?.prompt, 'Describe this image.');
+    assert.equal(prompts[0]?.attachments?.length, 1);
+    assert.equal(prompts[0]?.attachments?.[0]?.displayName, 'diagram.png');
+    assert.ok(writes[0]?.path.includes('diagram'));
+    assert.ok(writes[0]?.path.includes('chat-1'));
   });
 
   it('uses transcription text directly when voice transcription succeeds', async () => {
@@ -148,5 +147,73 @@ describe('handleIncomingFileUpload', () => {
         attachments: undefined,
       },
     ]);
+  });
+
+  it('generates unique filenames to avoid collisions', async () => {
+    const { deps, writes } = createDeps();
+
+    await handleIncomingFileUpload(
+      { fileId: 'AAbb1234CCdd', fileName: 'photo.jpg', caption: '', chatId: 'chat-1', msgId: 10 },
+      deps,
+    );
+    await handleIncomingFileUpload(
+      { fileId: 'EEff5678GGhh', fileName: 'photo.jpg', caption: '', chatId: 'chat-1', msgId: 11 },
+      deps,
+    );
+
+    assert.equal(writes.length, 2);
+    assert.notEqual(writes[0]?.path, writes[1]?.path);
+    assert.ok(writes[0]?.path.includes('10'));
+    assert.ok(writes[1]?.path.includes('11'));
+  });
+
+  it('attaches non-image files as FileAttachment with displayName', async () => {
+    const { deps, prompts } = createDeps();
+
+    await handleIncomingFileUpload(
+      { fileId: 'file-1', fileName: 'report.pdf', caption: 'Check this', chatId: 'chat-1', msgId: 1 },
+      deps,
+    );
+
+    assert.equal(prompts.length, 1);
+    assert.equal(prompts[0]?.attachments?.length, 1);
+    assert.equal(prompts[0]?.attachments?.[0]?.displayName, 'report.pdf');
+    assert.ok(prompts[0]?.prompt.includes('Check this'));
+  });
+
+  it('sanitizes path traversal in filenames', async () => {
+    const { deps, writes } = createDeps();
+
+    await handleIncomingFileUpload(
+      { fileId: 'file-1', fileName: '../../../etc/passwd', caption: '', chatId: 'chat-1', msgId: 1 },
+      deps,
+    );
+
+    assert.equal(writes.length, 1);
+    assert.ok(!writes[0]?.path.includes('..'));
+    assert.ok(writes[0]?.path.includes('passwd'));
+  });
+
+  it('uses custom uploadDir from config', async () => {
+    const { deps, writes, directories } = createDeps({ uploadDir: '/custom/uploads' });
+
+    await handleIncomingFileUpload(
+      { fileId: 'file-1', fileName: 'photo.jpg', caption: '', chatId: 'chat-1', msgId: 1 },
+      deps,
+    );
+
+    assert.ok(directories[0]?.startsWith('/custom/uploads'));
+    assert.ok(writes[0]?.path.startsWith('/custom/uploads'));
+  });
+
+  it('creates per-chat subdirectories', async () => {
+    const { deps, directories } = createDeps();
+
+    await handleIncomingFileUpload(
+      { fileId: 'file-1', fileName: 'photo.jpg', caption: '', chatId: '-100123456', msgId: 1 },
+      deps,
+    );
+
+    assert.ok(directories[0]?.includes('-100123456'));
   });
 });

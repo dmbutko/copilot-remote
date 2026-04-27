@@ -2442,6 +2442,7 @@ async function main(): Promise<void> {
         logDebug: (message, error) => {
           log.debug(message, error);
         },
+        uploadDir: (config as Record<string, unknown>).uploadDir as string | undefined,
       },
     );
   };
