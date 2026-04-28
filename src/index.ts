@@ -1260,6 +1260,10 @@ async function main(): Promise<void> {
       const shouldRetryFresh = isTimeout && hadNoCopilotEvents && attempt < 2;
 
       if (shouldRetryFresh) {
+        // Delete orphaned placeholder from failed attempt
+        if (streamMsgId) {
+          await client.deleteMessage?.(chatId, streamMsgId).catch(() => {});
+        }
         markTimeline('retry_fresh', 'no-sdk-events-before-timeout');
         logPromptTimeline('retry_fresh');
         log.warn(
@@ -1304,6 +1308,10 @@ async function main(): Promise<void> {
       // but disk state is intact. Resume from disk and replay the user's message
       // transparently instead of asking them to send it again.
       if (isSessionNotFound && attempt < 2) {
+        // Delete orphaned placeholder from failed attempt
+        if (streamMsgId) {
+          await client.deleteMessage?.(chatId, streamMsgId).catch(() => {});
+        }
         markTimeline('retry_resume', 'session-not-found');
         logPromptTimeline('retry_resume');
         log.info(
