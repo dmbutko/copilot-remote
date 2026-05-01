@@ -371,13 +371,27 @@ export async function handleConfigCallback(
     const c = cfg(chatId);
     c.model = data.slice(6);
     setCfg(chatId, c);
-    const s = sessions.get(chatId);
-    if (s?.alive)
+    const old = sessions.get(chatId);
+    const savedId = old?.sessionId ?? sessionStore.get(chatId)?.sessionId;
+    if (old?.alive) await old.disconnect();
+    sessions.delete(chatId);
+    if (savedId) {
+      const { Session } = await import('./session.js');
+      const s = new Session();
       try {
-        await s.setModel(c.model);
+        await s.resume(savedId, {
+          cwd: deps.workDir(chatId),
+          binary: deps.bin,
+          model: c.model,
+          autopilot: c.autopilot,
+          reasoningEffort: (c.reasoningEffort || undefined) as 'low' | 'medium' | 'high' | 'xhigh' | undefined,
+        });
+        sessions.set(chatId, s);
       } catch {
-        /* ignore */
+        deps.suspendSession(chatId);
+        await deps.getSession(chatId);
       }
+    }
     await sendConfigMenu(chatId, deps, msgId);
     return true;
   }
