@@ -160,7 +160,7 @@ describe('Session', () => {
     const result = await session.handlePermission({ kind: 'shell' });
 
     assert.equal(seen.length, 1);
-    assert.equal((result as { kind: string }).kind, 'approved');
+    assert.equal((result as { kind: string }).kind, 'approve-once');
   });
 
   it('emits permission_request and resolves denial when deny() is called', async () => {
@@ -171,7 +171,7 @@ describe('Session', () => {
 
     const result = await session.handlePermission({ kind: 'write' });
 
-    assert.equal((result as { kind: string }).kind, 'denied-interactively-by-user');
+    assert.equal((result as { kind: string }).kind, 'reject');
   });
 
   it('emits permission_timeout and denies when approval expires', async () => {
@@ -199,7 +199,7 @@ describe('Session', () => {
 
     const result = await pending;
     assert.deepEqual(events, ['request', 'timeout']);
-    assert.equal((result as { kind: string }).kind, 'denied-interactively-by-user');
+    assert.equal((result as { kind: string }).kind, 'user-not-available');
   });
 
   it('buildConfig pre-tool hook emits telemetry without overriding permissions', async () => {

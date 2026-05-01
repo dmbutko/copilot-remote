@@ -204,7 +204,7 @@ export class Session extends EventEmitter {
       ...(opts?.provider ? { useLoggedInUser: false } : {}),
     };
     if (opts?.binary) clientOpts.cliPath = opts.binary;
-    if (opts?.githubToken && !opts.provider) clientOpts.githubToken = opts.githubToken;
+    if (opts?.githubToken && !opts.provider) clientOpts.gitHubToken = opts.githubToken;
     return clientOpts;
   }
 
@@ -451,6 +451,7 @@ export class Session extends EventEmitter {
       },
       onPermissionRequest: this._autopilot ? approveAll : (req: PermissionRequest) => this.handlePermission(req),
       onUserInputRequest: (req: UserInputRequest) => this.handleUserInput(req),
+      includeSubAgentStreamingEvents: false,
       infiniteSessions:
         opts.infiniteSessions === false
           ? { enabled: false }
@@ -725,19 +726,19 @@ export class Session extends EventEmitter {
           clearTimeout(timer);
           timer = null;
         }
-        resolve({ kind: approved ? 'approved' : 'denied-interactively-by-user' } as PermissionRequestResult);
+        resolve({ kind: approved ? 'approve-once' : 'reject' } as unknown as PermissionRequestResult);
       };
       // Register listener BEFORE emitting permission_request so that synchronous
       // auto-approve (which calls session.approve() → emit('permission_response'))
       // can be caught. Previously the listener was registered after the emit,
       // causing auto-approved permissions to fire into the void and time out.
       this.once('permission_response', handler);
-      this.emit('permission_request', { ...(req as Record<string, unknown>), turnId: this.activeTurnId });
+      this.emit('permission_request', { ...(req as unknown as Record<string, unknown>), turnId: this.activeTurnId });
       timer = setTimeout(() => {
         timer = null;
         this.off('permission_response', handler);
         this.emit('permission_timeout');
-        resolve({ kind: 'denied-interactively-by-user' } as PermissionRequestResult);
+        resolve({ kind: 'user-not-available' } as unknown as PermissionRequestResult);
       }, 120_000);
     });
   }
@@ -822,7 +823,7 @@ export class Session extends EventEmitter {
         );
         log.debug('sendAndWait result:', JSON.stringify(result));
 
-        const resultObj = result as Record<string, unknown>;
+        const resultObj = result as unknown as Record<string, unknown>;
         const resultData = (resultObj?.data as Record<string, unknown>) ?? {};
 
         return {
@@ -879,16 +880,16 @@ export class Session extends EventEmitter {
     await this.session!.rpc.mode.set({ mode: mode as 'interactive' | 'plan' | 'autopilot' });
   }
   async getMode(): Promise<string> {
-    return (await this.session!.rpc.mode.get()).mode;
+    return await this.session!.rpc.mode.get();
   }
   async compact(): Promise<CompactResponse> {
-    return this.session!.rpc.compaction.compact() as Promise<CompactResponse>;
+    return this.session!.rpc.history.compact() as Promise<CompactResponse>;
   }
   async startFleet(prompt?: string): Promise<unknown> {
     return this.session!.rpc.fleet.start({ prompt });
   }
   async listAgents(): Promise<AgentListResponse> {
-    return this.session!.rpc.agent.list() as Promise<AgentListResponse>;
+    return this.session!.rpc.agent.list() as unknown as Promise<AgentListResponse>;
   }
   async selectAgent(name: string): Promise<unknown> {
     return this.session!.rpc.agent.select({ name });
@@ -924,10 +925,10 @@ export class Session extends EventEmitter {
     return (this.session?.getMessages() ?? []) as SessionMessage[];
   }
   async listFiles(): Promise<string[]> {
-    return ((await this.session!.rpc.workspace.listFiles()) as { files?: string[] })?.files ?? [];
+    return ((await this.session!.rpc.workspaces.listFiles()) as { files?: string[] })?.files ?? [];
   }
   async readFile(path: string): Promise<string> {
-    return ((await this.session!.rpc.workspace.readFile({ path })) as { content?: string })?.content ?? '';
+    return ((await this.session!.rpc.workspaces.readFile({ path })) as { content?: string })?.content ?? '';
   }
 
   async newSession(opts?: Partial<SessionOptions>): Promise<void> {
