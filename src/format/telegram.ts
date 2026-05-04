@@ -259,7 +259,19 @@ function splitMarkdownIRPreserveWhitespace(ir: MarkdownIR, limit: number): Markd
   const chunks: MarkdownIR[] = [];
   let cursor = 0;
   while (cursor < ir.text.length) {
-    const end = Math.min(ir.text.length, cursor + normalizedLimit);
+    const hardEnd = Math.min(ir.text.length, cursor + normalizedLimit);
+    let end = hardEnd;
+    if (end < ir.text.length) {
+      const lookbackWindow = Math.max(20, Math.floor(normalizedLimit / 8));
+      const minSplit = Math.max(cursor + 1, hardEnd - lookbackWindow);
+      for (let i = hardEnd; i > minSplit; i--) {
+        if (/\s/.test(ir.text[i - 1] ?? '')) {
+          end = i;
+          break;
+        }
+      }
+    }
+    if (end <= cursor) end = hardEnd;
     chunks.push({
       text: ir.text.slice(cursor, end),
       styles: sliceStyleSpansLocal(ir.styles, cursor, end),
