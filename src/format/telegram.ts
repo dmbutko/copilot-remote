@@ -218,18 +218,18 @@ export function markdownToTelegramHtml(markdown: string, options: { wrapFileRefs
   return html;
 }
 
+// Cap the dispatcher's split point at this fraction of the chunk's text so a barely-over-limit
+// input doesn't produce a tiny tail (and recurse into more tiny tails on the next pass).
+const MAX_FIRST_SPLIT_RATIO = 0.7;
+
 function splitTelegramChunkByHtmlLimit(chunk: MarkdownIR, htmlLimit: number, renderedHtmlLength: number): MarkdownIR[] {
   const currentTextLength = chunk.text.length;
   if (currentTextLength <= 1) return [chunk];
   const proportionalLimit = Math.floor((currentTextLength * htmlLimit) / Math.max(renderedHtmlLength, 1));
-  const candidateLimit = Math.min(currentTextLength - 1, proportionalLimit);
-  const splitLimit =
-    Number.isFinite(candidateLimit) && candidateLimit > 0
-      ? candidateLimit
-      : Math.max(1, Math.floor(currentTextLength / 2));
-  const split = splitMarkdownIRPreserveWhitespace(chunk, splitLimit);
-  if (split.length > 1) return split;
-  return splitMarkdownIRPreserveWhitespace(chunk, Math.max(1, Math.floor(currentTextLength / 2)));
+  const balancedCap = Math.floor(currentTextLength * MAX_FIRST_SPLIT_RATIO);
+  const safeProportional = proportionalLimit > 0 ? proportionalLimit : Math.floor(currentTextLength / 2);
+  const splitLimit = Math.max(1, Math.min(safeProportional, balancedCap));
+  return splitMarkdownIRPreserveWhitespace(chunk, splitLimit);
 }
 
 function sliceStyleSpansLocal(styles: MarkdownIR['styles'], start: number, end: number): MarkdownIR['styles'] {

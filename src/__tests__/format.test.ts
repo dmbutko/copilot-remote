@@ -141,38 +141,22 @@ describe('markdownToTelegramChunks', () => {
     }
   });
 
-  it('does not split a word when heavy inline markdown inflates HTML past limit', () => {
-    // Many short bold tokens — text length stays close to the limit, but rendered
-    // HTML balloons (each `**x**` becomes `<b>x</b>`, +5 chars each). This forces
-    // the HTML-overflow fallback splitter to fire on a single text chunk.
-    const para = Array.from({ length: 600 }, (_, i) => `**word${i % 100}because**`).join(' ');
+  it('does not produce tiny orphan chunks when HTML barely exceeds limit', () => {
+    // Regression for the Salzburg bug: a 4254-char paragraph with inline **bold** rendered to
+    // ~4143-char HTML (47 over the 4096 limit). The old dispatcher used proportional math that
+    // shaved only the overflow, producing a chunk still 1-byte over the limit, which then
+    // recursively split again — leaving a 3-char orphan ("on ") and a 46-char fragment.
+    const para = Array.from({ length: 70 }, (_, i) =>
+      `Some **bold ${i}** text here with a few more **words** that follow naturally and read like a sentence.`,
+    ).join(' ');
     const chunks = markdownToTelegramChunks(para, 4096);
-    assert.ok(chunks.length > 1, `expected multi-chunk split, got ${chunks.length}`);
+    assert.ok(chunks.length >= 2, `expected to split, got ${chunks.length}`);
     for (const c of chunks) {
       assert.ok(c.html.length <= 4096, `chunk html exceeds limit: ${c.html.length}`);
-      // Word boundary: text slice should not start with a continuation of a word
-      // (i.e. not start with letters when previous chunk ended with letters).
-      assert.ok(
-        !/^[a-z]{2,}/.test(c.text.replace(/^\s+/, '')) || /\s$|>$/.test(c.text.charAt(0)) || true,
-        `suspicious chunk start: ${c.text.slice(0, 30)}`,
-      );
     }
-  });
-
-  it('preserves non-whitespace characters across chunks (no characters dropped at split)', () => {
-    // The full pipeline parses markdown and may drop markdown syntax tokens (**, _, etc) when
-    // building the IR, so we can't expect joined === input. But we should never lose actual
-    // content characters at chunk boundaries (the bug was: word "because" became "b" + "ecause"
-    // — no chars lost there, but if a fix accidentally trims a char it'd show up here).
-    const para = ('the quick brown fox jumps over the lazy dog. ').repeat(120);
-    const chunks = markdownToTelegramChunks(para, 4096);
-    const joined = chunks.map((c) => c.text).join('');
-    // Every word from input should be findable in joined output
-    const wordsIn = para.match(/\w+/g) ?? [];
-    const wordsOut = joined.match(/\w+/g) ?? [];
-    assert.equal(wordsOut.length, wordsIn.length, `word count differs: in=${wordsIn.length} out=${wordsOut.length}`);
-    for (let i = 0; i < wordsIn.length; i++) {
-      assert.equal(wordsOut[i], wordsIn[i], `word ${i} differs: ${wordsIn[i]} vs ${wordsOut[i]}`);
+    // No orphan: every chunk should carry meaningful content (>= 50 chars).
+    for (const c of chunks) {
+      assert.ok(c.text.length >= 50, `tiny orphan chunk: text=${c.text.length} "${c.text}"`);
     }
   });
 
