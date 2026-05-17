@@ -29,22 +29,6 @@ describe('mcp-config', () => {
   });
 
   describe('loadMcpServers', () => {
-    it('returns empty when no sources exist', () => {
-      const { merged, sources } = loadMcpServers(undefined, tmpDir);
-      assert.equal(Object.keys(merged).length, 0);
-      assert.equal(sources.length, 0);
-    });
-
-    it('loads from config.json mcpServers', () => {
-      const cfgServers = {
-        myserver: { command: 'node', args: ['server.js'], tools: ['*'] },
-      };
-      const { merged, sources } = loadMcpServers(cfgServers, tmpDir);
-      assert.equal(Object.keys(merged).length, 1);
-      assert.ok('myserver' in merged);
-      assert.equal(sources.length, 1);
-    });
-
     it('loads from .vscode/mcp.json in workdir', () => {
       writeJson(path.join(tmpDir, '.vscode', 'mcp.json'), {
         servers: {

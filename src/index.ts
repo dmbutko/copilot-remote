@@ -23,7 +23,12 @@ import { log } from './log.js';
 import { formatPromptLogText } from './prompt-log.js';
 import { formatPromptTimeline, type PromptTimelineEntry } from './prompt-timeline.js';
 import { resolveProviderConfig } from './provider-config.js';
-import { RestartManager, consumeRestartNotice, persistRestartNotice } from './restart-manager.js';
+import {
+  RestartManager,
+  consumeRestartNotice,
+  filterRestartRecipients,
+  persistRestartNotice,
+} from './restart-manager.js';
 import { acquireSingleInstanceLock, createInstanceOwner } from './single-instance.js';
 import { finalizeStreamResponse } from './stream-lifecycle.js';
 import {
@@ -277,7 +282,7 @@ async function main(): Promise<void> {
     const recipients = new Set<string>();
     if (preferredChatId) recipients.add(preferredChatId);
     for (const chatKey of sessions.keys()) recipients.add(chatKey);
-    return [...recipients];
+    return filterRestartRecipients(recipients, restartManager.getStatus().notifyDmsOnly);
   };
 
   const requestSelfRestart = (reason: string, recipients: Iterable<string> = []) => {
@@ -295,12 +300,13 @@ async function main(): Promise<void> {
     workDirs: [config.workDir],
     config: configStore.raw(),
     onRestartRequired: ({ reason, changedPath }) => {
-      const supervisor = restartManager.getStatus().supervisor;
+      const status = restartManager.getStatus();
       const details = changedPath ? `\n\nChanged: \`${changedPath}\`` : '';
-      const action = supervisor
+      const action = status.supervisor
         ? '\n\nSupervisor detected — automatic restart is available.'
         : '\n\nUse /restart to reload now.';
-      for (const chatKey of sessions.keys()) {
+      const recipients = filterRestartRecipients(sessions.keys(), status.notifyDmsOnly);
+      for (const chatKey of recipients) {
         client.sendMessage(chatKey, `♻️ ${reason}${details}${action}`).catch(() => {});
       }
     },
@@ -2290,6 +2296,7 @@ async function main(): Promise<void> {
           `Enabled: ${status.enabled ? 'yes' : 'no'}`,
           `Supervisor: ${status.supervisor ?? 'none detected'}`,
           `Auto-restart: ${status.autoRestart ? 'yes' : 'no'}`,
+          `DM-only notices: ${status.notifyDmsOnly ? 'yes' : 'no'}`,
           `Watched paths: ${status.watchedPaths.length}`,
         ];
         if (status.pending?.reason) lines.push(`Pending restart: ${status.pending.reason}`);
@@ -2602,7 +2609,11 @@ async function main(): Promise<void> {
 
   const pendingRestartNotice = consumeRestartNotice();
   if (pendingRestartNotice) {
-    for (const recipient of pendingRestartNotice.recipients) {
+    const recipients = filterRestartRecipients(
+      pendingRestartNotice.recipients,
+      restartManager.getStatus().notifyDmsOnly,
+    );
+    for (const recipient of recipients) {
       client
         .sendMessage(recipient, `✅ Daemon restarted and back online.\n\n${pendingRestartNotice.reason}`)
         .catch(() => {});

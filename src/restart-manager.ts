@@ -14,6 +14,8 @@ export interface SelfDevelopmentSettings {
   watchAgents: boolean;
   watchSkills: boolean;
   watchPrompts: boolean;
+  /** When true, restart-related notices go only to private (DM) chats — never groups, supergroups, or forum topics. */
+  notifyDmsOnly: boolean;
 }
 
 export interface RestartSignalInfo {
@@ -53,7 +55,24 @@ const DEFAULT_SETTINGS: SelfDevelopmentSettings = {
   watchAgents: true,
   watchSkills: true,
   watchPrompts: true,
+  notifyDmsOnly: true,
 };
+
+const DM_SESSION_KEY_PATTERN = /^[1-9]\d*$/;
+
+/**
+ * Returns true when a session key corresponds to a Telegram private (DM) chat.
+ * Group/supergroup/channel ids are negative; forum topic keys contain ':'; both fail the pattern.
+ */
+export function isDmSessionKey(key: string): boolean {
+  return typeof key === 'string' && DM_SESSION_KEY_PATTERN.test(key);
+}
+
+/** Deduplicate recipients, optionally restricting to DM session keys. */
+export function filterRestartRecipients(recipients: Iterable<string>, notifyDmsOnly: boolean): string[] {
+  const unique = [...new Set([...recipients].filter((r) => typeof r === 'string' && r.trim()))];
+  return notifyDmsOnly ? unique.filter(isDmSessionKey) : unique;
+}
 
 const AGENT_DIRS = [
   ['.github', 'agents'],
@@ -324,6 +343,7 @@ export class RestartManager {
   getStatus(): {
     enabled: boolean;
     autoRestart: boolean;
+    notifyDmsOnly: boolean;
     supervisor: SupervisorKind;
     pending: RestartSignalInfo | null;
     watchedPaths: string[];
@@ -331,6 +351,7 @@ export class RestartManager {
     return {
       enabled: this.settings.enabled,
       autoRestart: this.settings.autoRestart,
+      notifyDmsOnly: this.settings.notifyDmsOnly,
       supervisor: this.supervisor,
       pending: this.pendingInfo,
       watchedPaths: [...this.watchedPaths],

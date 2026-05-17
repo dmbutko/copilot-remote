@@ -8,6 +8,8 @@ import {
   collectWatchTargets,
   consumeRestartNotice,
   detectSupervisor,
+  filterRestartRecipients,
+  isDmSessionKey,
   persistRestartNotice,
   resolveSelfDevelopmentSettings,
 } from '../restart-manager.js';
@@ -17,6 +19,65 @@ describe('detectSupervisor', () => {
     assert.equal(detectSupervisor({ LAUNCH_JOB_NAME: 'com.copilot-remote' }), 'launchd');
     assert.equal(detectSupervisor({ INVOCATION_ID: 'abc123' }), 'systemd');
     assert.equal(detectSupervisor({}), null);
+  });
+});
+
+describe('isDmSessionKey', () => {
+  it('accepts positive integer chat ids only', () => {
+    assert.equal(isDmSessionKey('880903035'), true);
+    assert.equal(isDmSessionKey('1'), true);
+  });
+
+  it('rejects group, supergroup, channel, and forum-topic keys', () => {
+    assert.equal(isDmSessionKey('-1234567890'), false); // basic group
+    assert.equal(isDmSessionKey('-1001234567890'), false); // supergroup/channel
+    assert.equal(isDmSessionKey('-1001234567890:5'), false); // forum topic
+    assert.equal(isDmSessionKey('123:45'), false); // (defensive) any colon key
+  });
+
+  it('rejects malformed or surprising inputs', () => {
+    assert.equal(isDmSessionKey(''), false);
+    assert.equal(isDmSessionKey('0'), false);
+    assert.equal(isDmSessionKey('0123'), false); // leading zero
+    assert.equal(isDmSessionKey('1e3'), false); // scientific notation
+    assert.equal(isDmSessionKey(' 123'), false); // leading whitespace
+    assert.equal(isDmSessionKey('0x10'), false); // hex
+    assert.equal(isDmSessionKey('123.4'), false);
+    assert.equal(isDmSessionKey('abc'), false);
+    assert.equal(isDmSessionKey(undefined as unknown as string), false);
+  });
+});
+
+describe('filterRestartRecipients', () => {
+  it('returns DM-only recipients when notifyDmsOnly is true', () => {
+    const result = filterRestartRecipients(['123', '-1001', '-123', '123:45', '456'], true);
+    assert.deepEqual(result.sort(), ['123', '456']);
+  });
+
+  it('returns all unique recipients when notifyDmsOnly is false', () => {
+    const result = filterRestartRecipients(['123', '-1001', '-123', '123:45', '123'], false);
+    assert.deepEqual(result.sort(), ['-1001', '-123', '123', '123:45']);
+  });
+
+  it('deduplicates and drops blank entries', () => {
+    const result = filterRestartRecipients(['123', '123', '', '   ', '456'], true);
+    assert.deepEqual(result.sort(), ['123', '456']);
+  });
+
+  it('returns an empty array when only group recipients are provided in DM-only mode', () => {
+    assert.deepEqual(filterRestartRecipients(['-1001', '-1002', '-1001234567890:5'], true), []);
+  });
+});
+
+describe('resolveSelfDevelopmentSettings', () => {
+  it('defaults notifyDmsOnly to true', () => {
+    const settings = resolveSelfDevelopmentSettings();
+    assert.equal(settings.notifyDmsOnly, true);
+  });
+
+  it('honors notifyDmsOnly override from config', () => {
+    const settings = resolveSelfDevelopmentSettings({ selfDevelopment: { notifyDmsOnly: false } });
+    assert.equal(settings.notifyDmsOnly, false);
   });
 });
 

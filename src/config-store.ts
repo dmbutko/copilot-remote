@@ -56,6 +56,7 @@ export interface GlobalConfig {
     watchAgents?: boolean;
     watchSkills?: boolean;
     watchPrompts?: boolean;
+    notifyDmsOnly?: boolean;
   };
   [key: string]: unknown;
 }
