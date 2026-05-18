@@ -259,6 +259,12 @@ export function loadMcpServers(
 export function formatServerLine(name: string, cfg: MCPServerConfig): string {
   const isRemote = cfg.type === 'http' || cfg.type === 'sse';
   const icon = isRemote ? '🌐' : '💻';
+  return `${icon} \`${name}\` — ${formatServerConfigDetails(cfg)}`;
+}
+
+/** Format only the command/url + tool spec (used in merged runtime views) */
+export function formatServerConfigDetails(cfg: MCPServerConfig): string {
+  const isRemote = cfg.type === 'http' || cfg.type === 'sse';
   const detail = isRemote
     ? (cfg as MCPRemoteServerConfig).url
     : `${(cfg as MCPLocalServerConfig).command} ${(cfg as MCPLocalServerConfig).args.join(' ')}`;
@@ -268,7 +274,7 @@ export function formatServerLine(name: string, cfg: MCPServerConfig): string {
       : cfg.tools.length === 0
         ? 'no tools'
         : cfg.tools.join(', ');
-  return `${icon} \`${name}\` — ${detail}\n   _Tools: ${toolsStr}_`;
+  return `${detail}\n   _Tools: ${toolsStr}_`;
 }
 
 /** Return the config file paths that loadMcpServers reads from (standard locations first, copilot-remote fallback last) */

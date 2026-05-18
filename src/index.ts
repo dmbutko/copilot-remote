@@ -14,7 +14,7 @@ import { TelegramClient } from './telegram.js';
 import { SessionStore } from './store.js';
 import { ConfigStore, type ChatConfig, type PermKind } from './config-store.js';
 import { discoverAgents } from './agent-discovery.js';
-import { loadMcpServers, formatServerLine, getConfigPaths } from './mcp-config.js';
+import { loadMcpServers, formatServerConfigDetails, getConfigPaths } from './mcp-config.js';
 import { handleAgentCallback } from './agent-menu.js';
 import { attachSessionById, formatSessionIdMessage, handleSessionCallback } from './session-menu.js';
 import { handleCdCommand } from './cd-command.js';
@@ -1895,83 +1895,71 @@ async function main(): Promise<void> {
         break;
       }
       case '/mcp': {
-        const sub = args[0]?.toLowerCase();
+        // Unified MCP view: merge runtime status (session.rpc.mcp.list) with
+        // configured details (mcp-config.json, .vscode/mcp.json, .mcp.json).
+        // Without an active session, fall back to configured-only.
+        const STATUS_EMOJI: Record<string, string> = {
+          connected: '✅',
+          failed: '❌',
+          'needs-auth': '🔐',
+          pending: '⏳',
+          disabled: '⏸️',
+          not_configured: '⚪',
+        };
+        const { merged: configured, sources } = loadMcpServers(configStore.raw().mcpServers, workDir(chatId));
+        const s = sessions.get(chatId);
 
-        // /mcp tools (legacy alias) and /mcp status — show runtime server status.
-        // (The old behavior tried to list per-tool names from client.rpc.tools.list,
-        // but that RPC never returns MCP tools. session.rpc.mcp.list does, but only
-        // at server granularity. If a user wants per-tool names, ask the agent.)
-        if (sub === 'tools' || sub === 'status') {
-          const s = sessions.get(chatId);
-          if (!s?.alive) {
-            await client.sendMessage(chatId, '⚪ No active session.');
-            break;
-          }
-          try {
-            const { servers } = await s.listMcpServers();
-            if (!servers?.length) {
-              await client.sendMessage(chatId, '🔌 No MCP servers active in this session.');
-            } else {
-              const statusEmoji: Record<string, string> = {
-                connected: '✅',
-                failed: '❌',
-                'needs-auth': '🔐',
-                pending: '⏳',
-                disabled: '⏸️',
-                not_configured: '⚪',
-              };
-              const lines = [`🔌 *MCP Servers* (${servers.length})`];
-              for (const srv of servers) {
-                const emoji = statusEmoji[srv.status] ?? '❔';
-                const source = srv.source ? ` _${srv.source}_` : '';
-                const errSuffix = srv.error ? `\n   _${srv.error}_` : '';
-                lines.push(`${emoji} \`${srv.name}\` — ${srv.status}${source}${errSuffix}`);
-              }
-              lines.push('');
-              lines.push("_Per-tool names aren't exposed by the SDK — ask the agent directly to enumerate them._");
-              await client.sendMessage(chatId, lines.join('\n'));
-            }
-          } catch (e) {
-            await client.sendMessage(
-              chatId,
-              '❌ Failed to list MCP servers: ' + (e instanceof Error ? e.message : String(e)),
-            );
-          }
+        // Short timeout — never block the chat on a sluggish MCP host init.
+        const runtime = s?.alive
+          ? await Promise.race([
+              s.listMcpServers().then((r) => r.servers ?? []),
+              new Promise<'timeout'>((res) => setTimeout(() => res('timeout'), 4000)),
+            ])
+          : null;
+        const rtMap = new Map(Array.isArray(runtime) ? runtime.map((r) => [r.name, r]) : []);
+        const names = [...new Set([...rtMap.keys(), ...Object.keys(configured)])].sort();
+
+        if (!names.length) {
+          await client.sendMessage(
+            chatId,
+            '🔌 No MCP servers configured.\n\nAdd to any of:\n' +
+              getConfigPaths(workDir(chatId))
+                .map((p) => '`' + p.replace(process.env.HOME ?? '', '~') + '`')
+                .join('\n'),
+          );
           break;
         }
 
-        // /mcp (default) — show configured servers with details
-        const { merged: mcpMerged, sources: mcpSources } = loadMcpServers(
-          configStore.raw().mcpServers,
-          workDir(chatId),
-        );
-        const mcpNames = Object.keys(mcpMerged);
-        const cfgPaths = getConfigPaths(workDir(chatId));
-        const pathList = cfgPaths.map((p) => '`' + p.replace(process.env.HOME ?? '', '~') + '`').join('\n');
-        if (!mcpNames.length) {
-          await client.sendMessage(
-            chatId,
-            '🔌 No MCP servers configured.\n\n' +
-              'Add servers as JSON in any of these files:\n' +
-              pathList +
-              '\n\nExample (`~/.copilot/mcp-config.json`):\n' +
-              '```json\n{\n  "mcpServers": {\n    "my-server": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-example"]\n    }\n  }\n}\n```\n' +
-              '_Then /new to start a session with the new servers._',
-          );
-        } else {
-          const lines = mcpNames.map((n) => formatServerLine(n, mcpMerged[n]));
-          const srcList = mcpSources.map((s) => '`' + s.name + '`').join(', ');
-          await client.sendMessage(
-            chatId,
-            '🔌 *MCP Servers* (' +
-              mcpNames.length +
-              ')\n\n' +
-              lines.join('\n\n') +
-              '\n\n_Sources: ' +
-              srcList +
-              '_\n_Commands: /mcp status (runtime), /mcp tools (alias)_',
-          );
+        let header = '';
+        if (runtime === 'timeout') {
+          header = '⚠️ Runtime status unavailable (timeout) — showing configured only.\n\n';
+        } else if (runtime == null) {
+          header =
+            '_No active session — showing configured only. Start one to see runtime status and built-ins like `github-mcp-server`._\n\n';
         }
+
+        const rows = names.map((n) => {
+          const rt = rtMap.get(n);
+          const cfg = configured[n];
+          const emoji = rt ? (STATUS_EMOJI[rt.status] ?? '❔') : '⚪';
+          // Status text:
+          // - runtime entry → SDK status (connected/failed/etc.)
+          // - configured + active session but no runtime entry → it wasn't loaded
+          // - configured + no session → just say "configured"
+          const status = rt?.status ?? (runtime ? 'configured, not running' : 'configured');
+          const sourceLabel = rt?.source ? ' _' + rt.source + '_' : '';
+          const errLine = rt?.error ? '\n   _' + rt.error + '_' : '';
+          const detailLine = cfg ? '\n   ' + formatServerConfigDetails(cfg) : '';
+          return emoji + ' `' + n + '` — ' + status + sourceLabel + errLine + detailLine;
+        });
+
+        const footer = sources.length
+          ? '\n\n_Config sources: ' + sources.map((src) => '`' + src.name + '`').join(', ') + '_'
+          : '';
+        await client.sendMessage(
+          chatId,
+          header + '🔌 *MCP Servers* (' + names.length + ')\n' + rows.join('\n') + footer,
+        );
         break;
       }
       case '/yes':
@@ -2403,8 +2391,7 @@ async function main(): Promise<void> {
             '*🔧 Tools & Agents*',
             '`/agent [name]` — Switch or list agents',
             '`/tools` — List available tools',
-            '`/mcp` — Configured MCP servers',
-            '`/mcp status` — Running MCP server status',
+            '`/mcp` — MCP servers and runtime status',
             '`/files` — Browse workspace files',
             '`/usage` — Token quota info',
             '',
