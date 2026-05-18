@@ -643,8 +643,25 @@ async function main(): Promise<void> {
       mcpServers: (() => {
         const { merged, sources } = loadMcpServers(globalCfg.mcpServers, cwd);
         if (sources.length) log.info(`Loaded MCP servers from ${sources.map((s) => s.name).join(', ')}`);
+        // Warn if a user-defined `github-mcp-server` entry will shadow the CLI's
+        // built-in authenticated config. The user-defined version typically points
+        // at the same URL but lacks the auto-injected Authorization header, so it
+        // gets stashed as `pendingGitHubMcpServers` and never connects in SDK mode.
+        // See plan.md, section "Why the prior manual attempt failed".
+        if ('github-mcp-server' in merged) {
+          log.warn(
+            '[mcp] Detected a user-defined `github-mcp-server` entry. This overrides ' +
+              'the built-in authenticated config and likely breaks github-mcp loading. ' +
+              'Remove it from ~/.copilot/mcp-config.json (or .vscode/mcp.json / .mcp.json) ' +
+              'to use the auto-injected version.',
+          );
+        }
         return Object.keys(merged).length ? merged : undefined;
       })(),
+      // Activate the CLI's built-in github-mcp injection + MCP/plugin/disabled-* discovery.
+      // Default on, opt-out via `enableCliConfigDiscovery: false` in config.json (e.g. for
+      // BYOK provider users who don't want the discovery side effects).
+      enableConfigDiscovery: globalCfg.enableCliConfigDiscovery !== false,
       customAgents: (() => {
         const discovered = discoverAgents(cwd);
         const configAgents = (globalCfg.customAgents ?? []) as Array<{ name: string }>;
@@ -1880,38 +1897,44 @@ async function main(): Promise<void> {
       case '/mcp': {
         const sub = args[0]?.toLowerCase();
 
-        // /mcp tools — list tools from MCP servers in the active session
-        if (sub === 'tools') {
+        // /mcp tools (legacy alias) and /mcp status — show runtime server status.
+        // (The old behavior tried to list per-tool names from client.rpc.tools.list,
+        // but that RPC never returns MCP tools. session.rpc.mcp.list does, but only
+        // at server granularity. If a user wants per-tool names, ask the agent.)
+        if (sub === 'tools' || sub === 'status') {
           const s = sessions.get(chatId);
           if (!s?.alive) {
             await client.sendMessage(chatId, '⚪ No active session.');
             break;
           }
           try {
-            const { tools } = await s.listTools();
-            const mcpTools = (tools ?? []).filter((t) => t.namespacedName?.includes('/'));
-            if (!mcpTools.length) {
-              await client.sendMessage(chatId, '🔌 No MCP tools active in this session.');
+            const { servers } = await s.listMcpServers();
+            if (!servers?.length) {
+              await client.sendMessage(chatId, '🔌 No MCP servers active in this session.');
             } else {
-              // Group by server prefix
-              const grouped = new Map<string, string[]>();
-              for (const t of mcpTools) {
-                const [server, ...toolParts] = (t.namespacedName ?? t.name).split('/');
-                const list = grouped.get(server) ?? [];
-                list.push(toolParts.join('/') || t.name);
-                grouped.set(server, list);
+              const statusEmoji: Record<string, string> = {
+                connected: '✅',
+                failed: '❌',
+                'needs-auth': '🔐',
+                pending: '⏳',
+                disabled: '⏸️',
+                not_configured: '⚪',
+              };
+              const lines = [`🔌 *MCP Servers* (${servers.length})`];
+              for (const srv of servers) {
+                const emoji = statusEmoji[srv.status] ?? '❔';
+                const source = srv.source ? ` _${srv.source}_` : '';
+                const errSuffix = srv.error ? `\n   _${srv.error}_` : '';
+                lines.push(`${emoji} \`${srv.name}\` — ${srv.status}${source}${errSuffix}`);
               }
-              const lines: string[] = [];
-              for (const [server, toolNames] of grouped) {
-                lines.push('🔌 *' + server + '* (' + toolNames.length + ' tools)');
-                lines.push(toolNames.map((t) => '  • `' + t + '`').join('\n'));
-              }
+              lines.push('');
+              lines.push("_Per-tool names aren't exposed by the SDK — ask the agent directly to enumerate them._");
               await client.sendMessage(chatId, lines.join('\n'));
             }
           } catch (e) {
             await client.sendMessage(
               chatId,
-              '❌ Failed to list tools: ' + (e instanceof Error ? e.message : String(e)),
+              '❌ Failed to list MCP servers: ' + (e instanceof Error ? e.message : String(e)),
             );
           }
           break;
@@ -1946,7 +1969,7 @@ async function main(): Promise<void> {
               lines.join('\n\n') +
               '\n\n_Sources: ' +
               srcList +
-              '_\n_Commands: /mcp tools_',
+              '_\n_Commands: /mcp status (runtime), /mcp tools (alias)_',
           );
         }
         break;
@@ -2380,6 +2403,8 @@ async function main(): Promise<void> {
             '*🔧 Tools & Agents*',
             '`/agent [name]` — Switch or list agents',
             '`/tools` — List available tools',
+            '`/mcp` — Configured MCP servers',
+            '`/mcp status` — Running MCP server status',
             '`/files` — Browse workspace files',
             '`/usage` — Token quota info',
             '',

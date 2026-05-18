@@ -46,6 +46,16 @@ export interface GlobalConfig {
   systemInstructions?: string;
   availableTools?: string[];
   excludedTools?: string[];
+  /**
+   * When true (default), passes `enableConfigDiscovery: true` to the underlying CLI
+   * session. This activates the CLI's built-in github-mcp-server injection (and
+   * `web_search`), plus discovery of MCP servers / plugins / disabledMcpServers /
+   * disabledSkills from `~/.copilot/mcp-config.json`, `.vscode/mcp.json`, `.mcp.json`,
+   * and `~/.copilot/plugins/`. Set to false to revert to the pre-fix behavior
+   * (e.g. for BYOK provider sessions where built-in github-mcp is undesirable, or
+   * if discovered config conflicts with copilot-remote's explicit `mcpServers`).
+   */
+  enableCliConfigDiscovery?: boolean;
   /** Idle timeout in minutes — kills turn if no SDK events. 0 = disabled. Default: 15 */
   selfDevelopment?: {
     enabled?: boolean;

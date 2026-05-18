@@ -349,6 +349,32 @@ Optional config in `~/.copilot-remote/config.json`:
 
 This gives you the fun part of OpenClaw-style evolution without going full goblin mode on the bridge core.
 
+## GitHub MCP server (auto-loaded)
+
+The Copilot CLI bundles a built-in `github-mcp-server` that exposes 19 tools — code/repo/issue/PR search, file contents, commits, workflow logs, plus the renamed `web_search` — via `https://api.githubcopilot.com/mcp/readonly` with bearer-token auth wired up automatically.
+
+`copilot-remote` enables this by default. It is loaded for every session when:
+
+- the user is authenticated to a Copilot plan (Enterprise / Business / Pro / Individual), AND
+- no BYOK provider is configured (built-in MCP is gated off whenever you bring your own model), AND
+- `enableCliConfigDiscovery` is not explicitly set to `false` in `~/.copilot-remote/config.json`.
+
+The `web_search` tool comes free — the CLI strips `github-mcp-server-web_search` from the namespaced list and re-adds it as a top-level `web_search` so the model can call it like any other tool.
+
+To opt out (e.g. you only want manually-declared MCP servers from `~/.copilot/mcp-config.json`):
+
+```json
+{
+  "enableCliConfigDiscovery": false
+}
+```
+
+Setting `enableCliConfigDiscovery: false` also disables the CLI's auto-discovery of MCP servers from `.mcp.json` / `.vscode/mcp.json` / `~/.copilot/plugins/` and its `disabledMcpServers` / `disabledSkills` settings — useful for BYOK provider users who want full control over which MCPs run.
+
+> **Heads-up:** if you previously hand-added a `github-mcp-server` entry to `~/.copilot/mcp-config.json` (e.g. pointing at `https://api.enterprise.githubcopilot.com/mcp/readonly`), remove it. The CLI cannot inject auth headers into that entry from SDK mode, so it gets stashed as "pending authentication" and never connects, and your stale entry overrides the working built-in one. `copilot-remote` will log a warning on startup if it detects this.
+
+The github-mcp endpoint defaults to read-only. Write operations (`create_issue`, `comment_on_pr`, etc.) would require switching to the `/mcp` endpoint with `X-MCP-Toolsets: all` — not currently exposed by the SDK; open an issue if you want this.
+
 ## Browser Mocking for Telegram Web Apps
 
 `copilot-remote` itself is a Telegram bot bridge, not a browser-based Telegram Mini App. But if you build a companion web UI around it with React, Next.js, or another frontend stack, you can mock the Telegram environment locally instead of constantly reopening the Telegram client.

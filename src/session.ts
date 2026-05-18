@@ -99,6 +99,19 @@ export interface ToolsListResponse {
   tools?: ToolInfo[];
 }
 
+/** MCP server summary returned by session.mcp.list */
+export interface McpServerSummary {
+  name: string;
+  status: 'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled' | 'not_configured';
+  source?: 'user' | 'workspace' | 'plugin' | 'builtin';
+  error?: string;
+}
+
+/** Response from session.mcp.list */
+export interface McpListResponse {
+  servers: McpServerSummary[];
+}
+
 /** Session message */
 export interface SessionMessage {
   type: string;
@@ -128,6 +141,16 @@ export interface SessionOptions {
   systemInstructions?: string;
   availableTools?: string[];
   excludedTools?: string[];
+  /**
+   * Passes through to `SessionConfig.enableConfigDiscovery`. When true, the CLI
+   * auto-injects `github-mcp-server` (with bearer-token Authorization header
+   * already populated), exposes the `web_search` tool, and discovers MCP servers,
+   * plugins, and disabled-skills/MCP settings from the standard CLI config
+   * locations (~/.copilot/mcp-config.json, .vscode/mcp.json, .mcp.json,
+   * ~/.copilot/plugins/). When undefined or false, the CLI does none of that —
+   * explicit `mcpServers` in this options bag still flow through.
+   */
+  enableConfigDiscovery?: boolean;
   /**
    * Per-turn timeout in ms passed as the second arg to SDK `sendAndWait`.
    * The SDK rejects the awaited promise if `session.idle` doesn't arrive in time
@@ -501,6 +524,13 @@ export class Session extends EventEmitter {
       ...(opts.disabledSkills ? { disabledSkills: opts.disabledSkills } : {}),
       ...(opts.availableTools ? { availableTools: opts.availableTools } : {}),
       ...(opts.excludedTools ? { excludedTools: opts.excludedTools } : {}),
+      // enableConfigDiscovery activates the CLI's built-in github-mcp injection AND
+      // discovery of MCP/plugin/disabled-* settings. NOTE: the CLI gate also requires
+      // `!r.gitHubToken` (session-level) and `!r.provider`. copilot-remote passes the
+      // GitHub token at CopilotClient level (not session level) — do NOT add
+      // `gitHubToken: ...` to this returned config or built-in github-mcp will silently
+      // stop loading. See plan.md for full context.
+      ...(opts.enableConfigDiscovery ? { enableConfigDiscovery: true } : {}),
       hooks: {
         onSessionStart: async (_input: unknown, invocation: { sessionId: string }) => {
           this.emit('hook:session_start');
@@ -915,6 +945,15 @@ export class Session extends EventEmitter {
         rpc: { tools: { list: (opts: { sessionId: string }) => Promise<ToolsListResponse> } };
       }
     ).rpc.tools.list({ sessionId: this.session!.sessionId! });
+  }
+  /**
+   * List MCP servers attached to the current session, with their status.
+   * This is the right RPC for inventory — `listTools()` does NOT include MCP tools.
+   */
+  async listMcpServers(): Promise<McpListResponse> {
+    if (!this.session) return { servers: [] };
+    const rpc = (this.session as unknown as { rpc: { mcp: { list: () => Promise<McpListResponse> } } }).rpc;
+    return rpc.mcp.list();
   }
   async getQuota(): Promise<QuotaResponse> {
     return (
