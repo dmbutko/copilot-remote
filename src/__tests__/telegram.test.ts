@@ -498,6 +498,31 @@ describe('TelegramClient access control', () => {
     assert.deepEqual(seen, ['from user 111', 'from user 222']);
   });
 
+  it('accepts messages from an allowed user across any chat context (no chat scoping)', async () => {
+    const client = new TelegramClient({
+      botToken: 'test-token',
+      allowedUsers: ['111'],
+    });
+    const { bot } = await createTelegramHarness(client);
+
+    const seen: string[] = [];
+    client.onMessage = async (text) => {
+      seen.push(text);
+    };
+
+    // Same allowed user (fromId=111) messaging from three distinct chat contexts:
+    //   - their own private DM (chatId matches userId)
+    //   - a private chat with a different chatId (shouldn't happen in practice, but proves no chat-scoping)
+    //   - a supergroup forum topic
+    await bot.handleUpdate(makeTextUpdate({ messageId: 1, chatId: 111, fromId: 111, text: 'dm' }));
+    await bot.handleUpdate(makeTextUpdate({ messageId: 2, chatId: 999, fromId: 111, text: 'other-chat' }));
+    await bot.handleUpdate(
+      makeTextUpdate({ messageId: 3, chatId: -1001234567890, fromId: 111, threadId: 42, text: 'topic' }),
+    );
+
+    assert.deepEqual(seen, ['dm', 'other-chat', 'topic']);
+  });
+
   it('rejects messages from users not in allowedUsers', async () => {
     const client = new TelegramClient({
       botToken: 'test-token',
