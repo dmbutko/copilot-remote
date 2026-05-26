@@ -539,30 +539,6 @@ describe('TelegramClient access control', () => {
     assert.equal(denials.length, 1, 'should send only one denial across rapid repeated denials');
   });
 
-  it('denies messages from authorized users when chat is not in allowedChats', async () => {
-    const client = new TelegramClient({
-      botToken: 'test-token',
-      allowedUsers: ['111'],
-      allowedChats: ['-1001234567890'],
-    });
-    const { bot } = await createTelegramHarness(client);
-
-    let invoked = 0;
-    client.onMessage = async () => {
-      invoked++;
-    };
-
-    // Same user (111) but in a private chat with chatId=111 (not in allowedChats)
-    await bot.handleUpdate(makeTextUpdate({ messageId: 1, chatId: 111, fromId: 111, text: 'wrong chat' }));
-    assert.equal(invoked, 0);
-
-    // Now in the allowed supergroup
-    await bot.handleUpdate(
-      makeTextUpdate({ messageId: 2, chatId: -1001234567890, fromId: 111, text: 'ok', threadId: 5 }),
-    );
-    assert.equal(invoked, 1);
-  });
-
   it('denies all messages when allowedUsers is empty (no auto-pair by default)', async () => {
     const client = new TelegramClient({
       botToken: 'test-token',
@@ -579,25 +555,6 @@ describe('TelegramClient access control', () => {
     await bot.handleUpdate(makeTextUpdate({ messageId: 2, chatId: 200, fromId: 200, text: 'second' }));
 
     assert.equal(invoked, 0);
-  });
-
-  it('opt-in autoPairOnFirstContact pairs first sender and rejects others', async () => {
-    const client = new TelegramClient({
-      botToken: 'test-token',
-      allowedUsers: [],
-      autoPairOnFirstContact: true,
-    });
-    const { bot } = await createTelegramHarness(client);
-
-    const seen: string[] = [];
-    client.onMessage = async (text) => {
-      seen.push(text);
-    };
-
-    await bot.handleUpdate(makeTextUpdate({ messageId: 1, chatId: 100, fromId: 100, text: 'paired' }));
-    await bot.handleUpdate(makeTextUpdate({ messageId: 2, chatId: 200, fromId: 200, text: 'rejected' }));
-
-    assert.deepEqual(seen, ['paired']);
   });
 
   it('always rejects messages from bot accounts even if their id is in allowedUsers', async () => {

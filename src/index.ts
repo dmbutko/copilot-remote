@@ -99,11 +99,8 @@ function loadConfig() {
   const githubToken =
     cliUrl || provider ? undefined : (file.githubToken ?? process.env.GITHUB_TOKEN ?? resolveGhToken());
   const allowedUsersRaw = (file.allowedUsers ?? process.env.COPILOT_REMOTE_ALLOWED_USERS?.split(',') ?? []) as string[];
-  const allowedChatsRaw = (file.allowedChats ?? process.env.COPILOT_REMOTE_ALLOWED_CHATS?.split(',') ?? []) as string[];
   const allowedUsers = allowedUsersRaw.map((u) => String(u).trim()).filter(Boolean);
-  const allowedChats = allowedChatsRaw.map((c) => String(c).trim()).filter(Boolean);
   const userIdRe = /^\d{1,20}$/;
-  const chatIdRe = /^-?\d{1,20}$/;
   for (const u of allowedUsers) {
     if (!userIdRe.test(u)) {
       throw new Error(
@@ -111,14 +108,6 @@ function loadConfig() {
       );
     }
   }
-  for (const c of allowedChats) {
-    if (!chatIdRe.test(c)) {
-      throw new Error(
-        `Invalid allowedChats entry: ${JSON.stringify(c)} — must be a numeric Telegram chat ID (e.g. "-1001234567890").`,
-      );
-    }
-  }
-  const autoPairOnFirstContact = file.autoPairOnFirstContact === true || process.env.COPILOT_REMOTE_AUTO_PAIR === '1';
 
   const DEFAULT_TURN_TIMEOUT_MS = 30 * 60 * 1000;
   const turnTimeoutRaw = file.turnTimeoutMs ?? process.env.COPILOT_REMOTE_TURN_TIMEOUT_MS;
@@ -136,8 +125,6 @@ function loadConfig() {
   return {
     botToken,
     allowedUsers,
-    allowedChats,
-    autoPairOnFirstContact,
     turnTimeoutMs,
     workDir: file.workDir ?? process.env.COPILOT_REMOTE_WORKDIR ?? process.cwd(),
     copilotBinary: file.copilotBinary ?? process.env.COPILOT_REMOTE_BINARY,
@@ -236,8 +223,6 @@ async function main(): Promise<void> {
     : new TelegramClient({
         botToken,
         allowedUsers: config.allowedUsers,
-        allowedChats: config.allowedChats,
-        autoPairOnFirstContact: config.autoPairOnFirstContact,
         profilePhoto: config.profilePhoto,
       });
 

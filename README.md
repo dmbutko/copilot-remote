@@ -137,7 +137,6 @@ Like Claude Remote Control, the important bit is that the local process must sta
   "copilotBinary": "/path/to/copilot",
   "cliUrl": "http://127.0.0.1:4141",
   "allowedUsers": ["123456789", "987654321"],
-  "allowedChats": ["-1001234567890"],
   "turnTimeoutMs": 1800000,
   "model": "claude-sonnet-4",
   "mode": "interactive",
@@ -159,11 +158,9 @@ Only `botToken` is required. If you are not using `cliUrl`, you also need GitHub
 
 ### Access control
 
-- **`allowedUsers`** — list of every Telegram user ID permitted to message the bot. Get a user's ID by having them message [@userinfobot](https://t.me/userinfobot). All listed users are accepted; anyone else is denied with a generic `⛔ Not authorized.` reply (rate-limited to one reply per minute per user, so the bot can't be flooded into being a presence oracle). Bot accounts are always denied, regardless of allowlist.
-- **`allowedChats`** *(optional, recommended for group setups)* — when set, even authorized users can only drive the bot from these chats. Group/supergroup IDs are negative (e.g. `-1001234567890`); add [@RawDataBot](https://t.me/RawDataBot) to the chat once to discover the ID. Recommended for the "two users in one supergroup with topics" pattern; omit for DM-only setups.
-- **`autoPairOnFirstContact`** *(default `false`)* — legacy behavior: when `allowedUsers` is empty, pair with whoever messages the bot first. Off by default — an empty `allowedUsers` now refuses all messages and logs a warning at startup. Set to `true` only if you understand the security tradeoff (anyone who finds your bot username before you do becomes the sole authorized user).
+- **`allowedUsers`** — list of every Telegram user ID permitted to message the bot. Get a user's ID by having them message [@userinfobot](https://t.me/userinfobot). All listed users are accepted; anyone else is denied with a generic `⛔ Not authorized.` reply (rate-limited to one reply per minute per user, so the bot can't be flooded into being a presence oracle). Bot accounts are always denied, regardless of allowlist. An empty `allowedUsers` refuses all messages and logs a warning at startup.
 
-Environment-variable equivalents (comma-separated for lists): `COPILOT_REMOTE_ALLOWED_USERS`, `COPILOT_REMOTE_ALLOWED_CHATS`, `COPILOT_REMOTE_AUTO_PAIR=1`.
+Environment-variable equivalent (comma-separated): `COPILOT_REMOTE_ALLOWED_USERS`.
 
 ### Timeouts
 
