@@ -35,6 +35,14 @@ async function withAbortTimeout<T>(fn: (signal?: AbortSignal) => Promise<T>, ms:
   }
 }
 
+/**
+ * Default timeout for Telegram message-send/edit calls without an explicit
+ * caller override. Telegram POSTs normally return in <1s; 30s gives ~30×
+ * safety margin and prevents the bot from awaiting forever when an HTTPS
+ * request silently hangs (observed once per ~1,500 sends in production).
+ */
+const DEFAULT_API_TIMEOUT_MS = 30_000;
+
 type MyContext = HydrateFlavor<FileFlavor<Context>>;
 
 export interface TelegramConfig {
@@ -481,7 +489,7 @@ export class TelegramClient implements Client {
     if (opts?.threadId) extra.message_thread_id = opts.threadId;
     if (opts?.disableNotification) extra.disable_notification = true;
 
-    const timeoutMs = opts?.timeoutMs;
+    const timeoutMs = opts?.timeoutMs ?? DEFAULT_API_TIMEOUT_MS;
     const rawApi = this.raw;
     const callApi = async (params: Record<string, unknown>, signal?: AbortSignal) => {
       return rawApi['sendMessage'](params as Parameters<typeof rawApi['sendMessage']>[0], signal);
@@ -490,9 +498,10 @@ export class TelegramClient implements Client {
     for (const chunk of chunks) {
       try {
         const params = { chat_id: chatId, ...extra, text: chunk.html, parse_mode: 'HTML' as const };
-        const res = timeoutMs
-          ? await withAbortTimeout(() => callApi(params), timeoutMs)
-          : await callApi(params);
+        // Pass signal through so grammY actually honours the abort when withAbortTimeout fires.
+        // (Previously `() => callApi(params)` discarded the signal, so the awaited call
+        // could hang forever even with timeoutMs set.)
+        const res = await withAbortTimeout((signal) => callApi(params, signal), timeoutMs);
         lastMsgId = (res as { message_id?: number })?.message_id ?? null;
       } catch (e) {
         if ((e as Error)?.name === 'AbortError') {
@@ -500,12 +509,12 @@ export class TelegramClient implements Client {
           return null;
         }
         log.debug('[Telegram] sendMessage HTML failed:', (e as Error)?.message ?? e);
-        // Fallback: send as plain text if HTML fails
+        // Fallback: send as plain text if HTML rendering failed. Skip on AbortError
+        // to avoid doubling the timeout window AND avoid duplicating a message whose
+        // ACK was lost in flight (Telegram may still have processed the original send).
         try {
           const params = { chat_id: chatId, ...extra, text: chunk.text, parse_mode: undefined };
-          const res = timeoutMs
-            ? await withAbortTimeout(() => callApi(params), timeoutMs)
-            : await callApi(params);
+          const res = await withAbortTimeout((signal) => callApi(params, signal), timeoutMs);
           lastMsgId = (res as { message_id?: number })?.message_id ?? null;
         } catch (e2) {
           if ((e2 as Error)?.name === 'AbortError') {
@@ -839,16 +848,36 @@ export class TelegramClient implements Client {
     params: Record<string, unknown>,
     text: string,
   ): Promise<{ message_id?: number } | null> {
+    // NOTE: pass `parse_mode: undefined` explicitly. The grammY transformer
+    // installed at construction time adds `parse_mode: 'HTML'` when the key
+    // is missing — so we MUST include it (set to undefined) to actually
+    // request the plain-text fallback path.
+    const call = (textBody: string, parseMode: 'HTML' | undefined, signal?: AbortSignal) =>
+      this.raw[method](
+        { ...params, text: textBody, parse_mode: parseMode },
+        signal,
+      ) as Promise<{ message_id?: number } | null>;
     try {
-      return (await this.raw[method]({ ...params, text: markdownToHtml(text) })) as { message_id?: number } | null;
-    } catch {
+      return await withAbortTimeout(
+        (signal) => call(markdownToHtml(text), 'HTML', signal),
+        DEFAULT_API_TIMEOUT_MS,
+      );
+    } catch (e) {
+      if ((e as Error)?.name === 'AbortError') {
+        log.warn('[Telegram API TIMEOUT]', `method=${method}`, `timeout=${DEFAULT_API_TIMEOUT_MS}ms`);
+        return null;
+      }
+      // HTML rendering failed — try plain text. Skip on AbortError (above) to
+      // avoid doubling the timeout window and potential duplicate sends.
       try {
-        return (await this.raw[method]({
-          ...params,
-          text: markdownToText(text),
-          parse_mode: undefined,
-        })) as { message_id?: number } | null;
-      } catch {
+        return await withAbortTimeout(
+          (signal) => call(markdownToText(text), undefined, signal),
+          DEFAULT_API_TIMEOUT_MS,
+        );
+      } catch (e2) {
+        if ((e2 as Error)?.name === 'AbortError') {
+          log.warn('[Telegram API TIMEOUT]', `method=${method}(plain)`, `timeout=${DEFAULT_API_TIMEOUT_MS}ms`);
+        }
         return null;
       }
     }

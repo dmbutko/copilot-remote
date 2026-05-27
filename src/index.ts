@@ -713,6 +713,15 @@ async function main(): Promise<void> {
     const c = cfg(chatId);
     const showThinking = c.showThinking;
     const showTools = c.showTools;
+    // Define react() and fire the "received" reaction BEFORE any awaited Telegram
+    // call (placeholder send, getSession, etc.) so the user sees acknowledgment
+    // on their message even if a subsequent Telegram API call hangs.
+    const react = c.showReactions
+      ? (e: string) => {
+          client.setReaction(chatId, msgId, e).catch(() => {});
+        }
+      : () => {};
+    react(LIFECYCLE_REACTIONS.received);
     let streamMsgId: number | null = null;
     let thinkingText = '',
       responseText = '';
@@ -847,11 +856,6 @@ async function main(): Promise<void> {
     // when the user explicitly opts into immediate mode.
     if (session.busy && c.messageMode === 'immediate') {
       if (typingInterval) { clearInterval(typingInterval); typingInterval = null; }
-      const react = c.showReactions
-        ? (e: string) => {
-            client.setReaction(chatId, msgId, e).catch(() => {});
-          }
-        : () => {};
       react('⚡');
       try {
         await session.sendImmediate(prompt, attachments);
@@ -870,14 +874,6 @@ async function main(): Promise<void> {
       typingInterval = null;
     }
     const turnReservation = session.reserveTurn();
-    const react = c.showReactions
-      ? (e: string) => {
-          client
-            .setReaction(chatId, msgId, e)
-            .catch(() => {});
-        }
-      : () => {};
-    react(LIFECYCLE_REACTIONS.received);
 
     const noteFirstStreamEvent = (phase: 'thinking' | 'response', chunk: string) => {
       if (firstStreamPhase) return;
