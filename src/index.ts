@@ -12,6 +12,7 @@ import type { ModelInfo, PermissionRequest } from '@github/copilot-sdk';
 import { MockTelegramHarness } from './testing/mock-telegram-harness.js';
 import { TelegramClient } from './telegram.js';
 import { SessionStore } from './store.js';
+import { SessionRegistry } from './session-registry.js';
 import { ConfigStore, type ChatConfig, type PermKind } from './config-store.js';
 import { discoverAgents } from './agent-discovery.js';
 import { loadMcpServers, formatServerConfigDetails, getConfigPaths } from './mcp-config.js';
@@ -378,80 +379,10 @@ async function main(): Promise<void> {
 
   const workDir = (id: string) => workDirs.get(id) ?? config.workDir;
 
-  // ── Session lifecycle: suspend / archive ──
-
-  /** Kill in-memory session but preserve all disk state. Next message auto-resumes. */
-  function suspendSession(chatId: string): void {
-    const s = sessions.get(chatId);
-    if (s?.alive) {
-      try { s.kill(); } catch { /* ignore */ }
-    }
-    sessions.delete(chatId);
-    log.info('[session:suspend]', chatId);
-  }
-
-  /** Track consecutive resume failures to detect corrupt sessions. */
-  const resumeFailures = new Map<string, number>();
-
-  function recordResumeFailure(chatId: string): number {
-    const count = (resumeFailures.get(chatId) ?? 0) + 1;
-    resumeFailures.set(chatId, count);
-    return count;
-  }
-
-  function resetResumeFailures(chatId: string): void {
-    resumeFailures.delete(chatId);
-  }
-
-  /**
-   * Suspend + move entire session directory to archive. Session won't auto-resume;
-   * next message creates fresh. Old data preserved for forensic/query access.
-   */
-  async function archiveSession(chatId: string, explicitSessionId?: string): Promise<void> {
-    suspendSession(chatId);
-    const ids = [
-      ...new Set([...(explicitSessionId ? [explicitSessionId] : []), ...sessionStore.getSessionIds(chatId)]),
-    ];
-    const copilotDir = path.join(process.env.HOME ?? '~', '.copilot', 'session-state');
-    const archiveDir = path.join(copilotDir, '.archive');
-    for (const sessionId of ids) {
-      const sessionDir = path.join(copilotDir, sessionId);
-      if (!fs.existsSync(sessionDir)) continue;
-      fs.mkdirSync(archiveDir, { recursive: true });
-      const archiveDest = path.join(archiveDir, `${sessionId}-${Date.now()}`);
-      try {
-        fs.renameSync(sessionDir, archiveDest);
-        log.info('[session:archive]', sessionId, '→', archiveDest);
-      } catch (e) {
-        log.warn('[session:archive] Failed to move', sessionId, e);
-      }
-    }
-    sessionStore.delete(chatId);
-    resetResumeFailures(chatId);
-    pruneArchives(ids, 5);
-  }
-
-  /** Keep only the latest `keepN` archives per session ID prefix. */
-  function pruneArchives(sessionIds: string[], keepN: number): void {
-    const copilotDir = path.join(process.env.HOME ?? '~', '.copilot', 'session-state');
-    const archiveDir = path.join(copilotDir, '.archive');
-    if (!fs.existsSync(archiveDir)) return;
-    for (const prefix of sessionIds) {
-      try {
-        const entries = fs.readdirSync(archiveDir)
-          .filter(name => name.startsWith(prefix + '-'))
-          .sort()
-          .reverse(); // newest first (timestamp suffix sorts lexically)
-        for (const old of entries.slice(keepN)) {
-          const fullPath = path.join(archiveDir, old);
-          fs.rmSync(fullPath, { recursive: true, force: true });
-          log.info('[session:prune]', old);
-        }
-      } catch (e) {
-        log.debug('[session:prune] error', prefix, e);
-      }
-    }
-  }
+  // SessionRegistry (owns sessions/workDirs lifecycle: getSession with race-lock,
+  // suspendSession, archiveSession, invalidate*) is instantiated after
+  // buildSessionOptions and registerSessionListeners are defined below.
+  // Thin delegates (suspendSession/archiveSession/getSession) are wired there too.
 
   // Get or create session
   // Register persistent listeners on a session (called once per session, not per message)
@@ -678,61 +609,20 @@ async function main(): Promise<void> {
     };
   }
 
-  async function getSession(chatId: string): Promise<Session> {
-    let s = sessions.get(chatId);
-    if (s?.alive) return s;
+  const sessionRegistry = new SessionRegistry({
+    sessions,
+    workDirs,
+    sessionStore,
+    restartManager,
+    config,
+    buildSessionOptions,
+    registerSessionListeners,
+  });
 
-    s = new Session();
-    const deterministicSessionId = SessionStore.deterministicSessionId(chatId);
-    const opts = buildSessionOptions(chatId);
-
-    // Try to resume an existing session, preferring the deterministic Telegram-derived ID.
-    for (const saved of sessionStore.getResumeCandidates(chatId)) {
-      // Restore working directory from session DB
-      const resumeCwd = saved.cwd && saved.cwd !== config.workDir ? saved.cwd : opts.cwd;
-      if (saved.cwd && saved.cwd !== config.workDir) {
-        workDirs.set(chatId, saved.cwd);
-        restartManager.addWorkDir(saved.cwd);
-      }
-      try {
-        await s.resume(saved.sessionId, buildSessionOptions(chatId, resumeCwd, saved.sessionId));
-        sessionStore.touch(chatId);
-        resetResumeFailures(chatId);
-        sessions.set(chatId, s);
-        registerSessionListeners(s, chatId);
-        log.info('Resumed session', saved.sessionId, 'for', chatId);
-        return s;
-      } catch (e) {
-        log.warn('Resume failed for', saved.sessionId, '— trying next candidate/new session:', e);
-        const failures = recordResumeFailure(chatId);
-        if (failures >= 3) {
-          log.warn('[session:resume-guard] 3 consecutive failures, archiving', saved.sessionId);
-          await archiveSession(chatId, saved.sessionId);
-          break; // fall through to create fresh
-        }
-        if (saved.sessionId !== deterministicSessionId) {
-          sessionStore.delete(chatId);
-        }
-      }
-    }
-
-    // Create new session with a deterministic ID derived from chatId[:threadId].
-    await s.start(opts);
-    resetResumeFailures(chatId);
-    restartManager.addWorkDir(workDir(chatId));
-    if (s.sessionId) {
-      sessionStore.set(chatId, {
-        sessionId: s.sessionId,
-        cwd: workDir(chatId),
-        model: opts.model ?? '',
-        createdAt: Date.now(),
-        lastUsed: Date.now(),
-      });
-    }
-    registerSessionListeners(s, chatId);
-    sessions.set(chatId, s);
-    return s;
-  }
+  const getSession = (chatId: string) => sessionRegistry.getSession(chatId);
+  const suspendSession = (chatId: string) => sessionRegistry.suspendSession(chatId);
+  const archiveSession = (chatId: string, explicitSessionId?: string) =>
+    sessionRegistry.archiveSession(chatId, explicitSessionId);
 
   // ── Config menu dependencies (shared with config-menu module) ──
   const configMenuDeps: ConfigMenuDeps = {
