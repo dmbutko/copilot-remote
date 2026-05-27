@@ -1,13 +1,26 @@
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { ConfigStore, DEFAULT_CONFIG, normalizeMessageMode } from '../config-store.js';
 
 describe('ConfigStore', () => {
-  // Note: ConfigStore reads from ~/.copilot-remote/config.json at construction.
-  // These tests work with whatever global config exists, testing behavior not absolute values.
+  // Tests use a per-suite tmpdir for config so they don't mutate the real
+  // production `~/.copilot-remote/config.json` (which the running daemon
+  // would otherwise pick up as a "capability change" and auto-restart on).
+  let tmpDir: string;
+  const make = () => new ConfigStore({ configDir: tmpDir });
+
+  before(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfgstore-test-'));
+  });
+  after(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
 
   it('returns a config object with all expected keys', () => {
-    const store = new ConfigStore();
+    const store = make();
     const cfg = store.get('test-chat-' + Date.now());
     assert.equal(typeof cfg.model, 'string');
     assert.equal(typeof cfg.autopilot, 'boolean');
@@ -18,7 +31,7 @@ describe('ConfigStore', () => {
   });
 
   it('global set changes all keys', () => {
-    const store = new ConfigStore();
+    const store = make();
     const before = store.getGlobal().model;
     const testModel = 'test-model-' + Date.now();
     store.set('chat1', { model: testModel }, true);
@@ -29,7 +42,7 @@ describe('ConfigStore', () => {
   });
 
   it('thread overrides only affect that thread', () => {
-    const store = new ConfigStore();
+    const store = make();
     const globalModel = store.getGlobal().model;
     const threadKey = 'thread-' + Date.now();
     store.set(threadKey, { model: 'thread-only-model' }, false);
@@ -38,7 +51,7 @@ describe('ConfigStore', () => {
   });
 
   it('thread overrides merge with global', () => {
-    const store = new ConfigStore();
+    const store = make();
     const threadKey = 'thread-merge-' + Date.now();
     store.set(threadKey, { showThinking: true }, false);
     const cfg = store.get(threadKey);
@@ -48,7 +61,7 @@ describe('ConfigStore', () => {
   });
 
   it('autoApprove merges correctly', () => {
-    const store = new ConfigStore();
+    const store = make();
     const threadKey = 'thread-approve-' + Date.now();
     const globalShell = store.getGlobal().autoApprove.shell;
     store.set(threadKey, { autoApprove: { shell: !globalShell } as any }, false);
@@ -59,7 +72,7 @@ describe('ConfigStore', () => {
   });
 
   it('hasOverrides tracks thread state', () => {
-    const store = new ConfigStore();
+    const store = make();
     const key = 'has-overrides-' + Date.now();
     assert.equal(store.hasOverrides(key), false);
     store.set(key, { model: 'x' }, false);
@@ -67,7 +80,7 @@ describe('ConfigStore', () => {
   });
 
   it('resetOverrides reverts to global', () => {
-    const store = new ConfigStore();
+    const store = make();
     const key = 'reset-' + Date.now();
     store.set(key, { model: 'custom' }, false);
     assert.equal(store.get(key).model, 'custom');

@@ -99,8 +99,17 @@ export class ConfigStore {
   private global: ChatConfig;
   private rawFile: GlobalConfig = {};
   private overrides = new Map<string, Partial<ChatConfig>>();
+  private readonly configDir: string;
+  private readonly configFile: string;
 
-  constructor() {
+  /**
+   * @param opts.configDir Override the default `~/.copilot-remote/` directory.
+   *   Tests MUST pass a tmpdir here to avoid mutating the real production
+   *   config when calling `set(..., true)`.
+   */
+  constructor(opts: { configDir?: string } = {}) {
+    this.configDir = opts.configDir ?? CONFIG_DIR;
+    this.configFile = opts.configDir ? join(opts.configDir, 'config.json') : CONFIG_FILE;
     this.global = this.load();
   }
 
@@ -165,10 +174,10 @@ export class ConfigStore {
 
   private load(): ChatConfig {
     try {
-      if (existsSync(CONFIG_FILE)) {
-        const data = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));
+      if (existsSync(this.configFile)) {
+        const data = JSON.parse(readFileSync(this.configFile, 'utf-8'));
         const provider = resolveProviderConfig(data.provider);
-        log.info('[config] Loaded from', CONFIG_FILE);
+        log.info('[config] Loaded from', this.configFile);
         this.rawFile = {
           ...data,
           ...(provider ? { provider } : {}),
@@ -189,9 +198,9 @@ export class ConfigStore {
 
   private save(): void {
     try {
-      if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true });
-      atomicWriteSync(CONFIG_FILE, JSON.stringify({ ...this.rawFile, ...this.global }, null, 2), { mode: 0o600 });
-      log.info('[config] Saved to', CONFIG_FILE);
+      if (!existsSync(this.configDir)) mkdirSync(this.configDir, { recursive: true });
+      atomicWriteSync(this.configFile, JSON.stringify({ ...this.rawFile, ...this.global }, null, 2), { mode: 0o600 });
+      log.info('[config] Saved to', this.configFile);
     } catch (e) {
       log.error('[config] Failed to save:', e);
     }

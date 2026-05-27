@@ -253,8 +253,33 @@ async function main(): Promise<void> {
   _globalClient = client;
   const sessionStore = new SessionStore();
   const workDirs = new Map<string, string>(sessionStore.getAllWorkDirs());
-  const pendingPerms = new Map<number, string>();
-  const pendingInputs = new Map<number, string>();
+  // Pending state: composite key `${chatId}:${msgId}` matches Telegram's
+  // per-chat msgId identity model. `chatId` MUST be the normalized form used
+  // for `sessions.get(chatId)` (i.e. sessionKey(rawChatId, threadId) when
+  // threaded). Never parse keys — only construct via pendingKey() and
+  // prefix-match via `${chatId}:`.
+  const pendingPerms = new Set<string>();
+  const pendingInputs = new Set<string>();
+  const pendingKey = (chatId: string, msgId: number) => `${chatId}:${msgId}`;
+  // chatId-scoped match: `${chatId}:` prefix AND the next colon (separating
+  // chatId from msgId) is at exactly chatId.length. Required because chatId
+  // for threaded chats has the form `${rawChatId}:${threadId}` and we must
+  // NOT have a DM clear (chatId=`X`) sweep thread entries (chatId=`X:Y`).
+  // msgIds are always numeric, so the boundary colon is unambiguous.
+  const matchesChat = (k: string, chatId: string) =>
+    k.startsWith(`${chatId}:`) && k.lastIndexOf(':') === chatId.length;
+  const setPendingPerm = (chatId: string, msgId: number) => pendingPerms.add(pendingKey(chatId, msgId));
+  const hasPendingPerm = (chatId: string, msgId: number) => pendingPerms.has(pendingKey(chatId, msgId));
+  const clearPendingPerm = (chatId: string, msgId: number) => pendingPerms.delete(pendingKey(chatId, msgId));
+  const clearPendingPermsForChat = (chatId: string) => {
+    for (const k of pendingPerms) if (matchesChat(k, chatId)) pendingPerms.delete(k);
+  };
+  const setPendingInput = (chatId: string, msgId: number) => pendingInputs.add(pendingKey(chatId, msgId));
+  const hasPendingInput = (chatId: string, msgId: number) => pendingInputs.has(pendingKey(chatId, msgId));
+  const clearPendingInput = (chatId: string, msgId: number) => pendingInputs.delete(pendingKey(chatId, msgId));
+  const clearPendingInputsForChat = (chatId: string) => {
+    for (const k of pendingInputs) if (matchesChat(k, chatId)) pendingInputs.delete(k);
+  };
   const threadMap = new Map<string, number>(); // sessionKey → threadId
   let shuttingDown = false;
   let pendingRestartReason: string | null = null;
@@ -401,14 +426,14 @@ async function main(): Promise<void> {
     });
     session.on('turn_start', () => {});
     session.on('permission_timeout', () => {
-      for (const [id, cid] of pendingPerms) {
-        if (cid === chatId) {
-          pendingPerms.delete(id);
-          client.editButtons(chatId, id, '⏰ Expired (denied)', []).catch(() => {});
-          setTimeout(() => {
-            client.deleteMessage?.(chatId, id).catch(() => {});
-          }, 8_000);
-        }
+      for (const k of pendingPerms) {
+        if (!matchesChat(k, chatId)) continue;
+        const id = Number(k.slice(chatId.length + 1));
+        pendingPerms.delete(k);
+        client.editButtons(chatId, id, '⏰ Expired (denied)', []).catch(() => {});
+        setTimeout(() => {
+          client.deleteMessage?.(chatId, id).catch(() => {});
+        }, 8_000);
       }
     });
     session.on('notification', async (text: string) => {
@@ -1093,7 +1118,7 @@ async function main(): Promise<void> {
           { text: '✅ All', data: pfx('perm:all') },
         ],
       ]);
-      if (id) pendingPerms.set(id, chatId);
+      if (id) setPendingPerm(chatId, id);
     };
 
     const onUserInput = async (req: UserInputRequest & { turnId?: string | null }) => {
@@ -1103,10 +1128,10 @@ async function main(): Promise<void> {
       if (choices?.length) {
         const buttons = choices.map((c: string) => [{ text: c, data: '@' + chatId + '|input:' + c }]);
         const id = await client.sendButtons(chatId, '❓ ' + question, buttons);
-        if (id) pendingInputs.set(id, chatId);
+        if (id) setPendingInput(chatId, id);
       } else {
         const id = await client.sendMessage(chatId, '❓ ' + question + '\n\n_Reply to this message to answer_');
-        if (id) pendingInputs.set(id, chatId);
+        if (id) setPendingInput(chatId, id);
       }
     };
 
@@ -1336,29 +1361,29 @@ async function main(): Promise<void> {
     if (threadId) threadMap.set(key, threadId);
 
     // Reply to permission message
-    if (replyToMsgId && pendingPerms.has(replyToMsgId)) {
+    if (replyToMsgId && hasPendingPerm(key, replyToMsgId)) {
       const lower = text.toLowerCase().trim();
       const s = sessions.get(key);
       if (s?.alive) {
         if (['yes', 'y', 'approve', '👍'].includes(lower)) {
           s.approve();
-          pendingPerms.delete(replyToMsgId);
+          clearPendingPerm(key, replyToMsgId);
           await client.deleteMessage?.(chatId, replyToMsgId);
           return;
         }
         if (['no', 'n', 'deny', '👎'].includes(lower)) {
           s.deny();
-          pendingPerms.delete(replyToMsgId);
+          clearPendingPerm(key, replyToMsgId);
           await client.editButtons(chatId, replyToMsgId, '❌ Denied', []);
           return;
         }
       }
     }
 
-    if (replyToMsgId && pendingInputs.has(replyToMsgId)) {
+    if (replyToMsgId && hasPendingInput(key, replyToMsgId)) {
       const s = sessions.get(key);
       if (s?.alive) {
-        pendingInputs.delete(replyToMsgId);
+        clearPendingInput(key, replyToMsgId);
         s.answerInput(text);
         return;
       }
@@ -2291,16 +2316,16 @@ async function main(): Promise<void> {
   // ── Config menu ──
   client.onReaction = async (emoji, rawChatId, msgId, threadId) => {
     const chatId = threadId ? sessionKey(rawChatId, threadId) : rawChatId;
-    if (!pendingPerms.has(msgId)) return;
+    if (!hasPendingPerm(chatId, msgId)) return;
     const s = sessions.get(chatId);
     if (!s?.alive) return;
     if (emoji === '👍' || emoji === '✅') {
       s.approve();
-      pendingPerms.delete(msgId);
+      clearPendingPerm(chatId, msgId);
       await client.deleteMessage?.(chatId, msgId);
     } else if (emoji === '👎' || emoji === '❌') {
       s.deny();
-      pendingPerms.delete(msgId);
+      clearPendingPerm(chatId, msgId);
       await client.editButtons(chatId, msgId, '❌ Denied', []);
     }
   };
@@ -2367,31 +2392,34 @@ async function main(): Promise<void> {
     }
 
     if (data.startsWith('perm:')) {
-      const s = sessions.get(chatId);
-      if (!s?.alive) return;
       if (data === 'perm:all') {
-        // Approve all pending prompts in this chat (doesn't switch mode)
+        // perm:all approves the clicked prompt + sweeps all other pending in chat
+        if (!hasPendingPerm(chatId, msgId)) return;
+        const s = sessions.get(chatId);
+        if (!s?.alive) return;
         s.approve();
-        for (const [id, cid] of pendingPerms) {
-          if (cid === chatId) {
-            s.approve();
-            pendingPerms.delete(id);
-            if (id !== msgId) client.deleteMessage?.(chatId, id).catch(() => {});
-          }
+        for (const k of pendingPerms) {
+          if (!matchesChat(k, chatId)) continue;
+          const id = Number(k.slice(chatId.length + 1));
+          s.approve();
+          pendingPerms.delete(k);
+          if (id !== msgId) client.deleteMessage?.(chatId, id).catch(() => {});
         }
         await client.deleteMessage?.(chatId, msgId);
       } else {
+        // Stale-button guard: if the prompt isn't pending, the top-of-handler
+        // answerCallback() already stopped the spinner — do NOT edit buttons
+        // (they may already show ✅/❌ from a prior accept).
+        if (!hasPendingPerm(chatId, msgId)) return;
+        const s = sessions.get(chatId);
+        if (!s?.alive) return;
         const ok = data === 'perm:yes';
-        if (ok) {
-          s.approve();
-        } else {
-          s.deny();
-        }
-        pendingPerms.delete(msgId);
+        clearPendingPerm(chatId, msgId);
+        if (ok) s.approve();
+        else s.deny();
         if (ok) {
           await client.deleteMessage?.(chatId, msgId);
         } else {
-          // Keep denial visible — user may want to know what was rejected.
           await client.editButtons(chatId, msgId, '❌', []);
         }
       }
@@ -2423,11 +2451,15 @@ async function main(): Promise<void> {
     // Handle user input responses (from ask_user tool)
     if (data.startsWith('input:')) {
       const answer = data.slice('input:'.length);
+      // Stale-button guard: if no pending entry, the top-of-handler
+      // answerCallback() already stopped the spinner — do NOT edit
+      // buttons (they may already show ✅ from a prior accept).
+      if (!hasPendingInput(chatId, msgId)) return;
       const s = sessions.get(chatId);
-      if (s?.alive) {
-        s.answerInput(answer);
-        await client.editButtons(chatId, msgId, '✅ ' + answer, []);
-      }
+      if (!s?.alive) return;
+      clearPendingInput(chatId, msgId);
+      s.answerInput(answer);
+      await client.editButtons(chatId, msgId, '✅ ' + answer, []);
       return;
     }
   };
