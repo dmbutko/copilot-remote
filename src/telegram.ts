@@ -450,7 +450,7 @@ export class TelegramClient implements Client {
     );
 
     if (this.allowedUsers.size > 0) {
-      log.info('[Telegram] Polling started — authorized users: ' + [...this.allowedUsers].join(', '));
+      log.info('[Telegram] Starting polling — authorized users: ' + [...this.allowedUsers].join(', '));
     } else {
       log.warn(
         '[Telegram] ⚠️  allowedUsers is empty — bot will refuse ALL messages. ' +
@@ -480,6 +480,7 @@ export class TelegramClient implements Client {
           },
         },
       });
+      log.info('[Telegram] Polling runner launched');
 
       // Set profile photo if configured
       const photoPath = this.config.profilePhoto;
@@ -577,23 +578,45 @@ export class TelegramClient implements Client {
     const chunks = markdownToTelegramChunks(text, MAX_MESSAGE_LENGTH);
     const chunk = chunks[0]; // edit can only update one message — use first chunk
     if (!chunk) return;
+    const editApi = (params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> =>
+      this.raw['editMessageText'](params as Parameters<typeof this.raw['editMessageText']>[0], signal) as Promise<unknown>;
     try {
-      await this.raw['editMessageText']({
-        chat_id: chatId,
-        message_id: msgId,
-        text: chunk.html,
-        parse_mode: 'HTML',
-      });
-    } catch {
-      // HTML failed — try plain text
+      await withAbortTimeout(
+        (signal) =>
+          editApi({ chat_id: chatId, message_id: msgId, text: chunk.html, parse_mode: 'HTML' }, signal),
+        DEFAULT_API_TIMEOUT_MS,
+      );
+    } catch (e) {
+      if ((e as Error)?.name === 'AbortError') {
+        log.warn(
+          '[Telegram API TIMEOUT]',
+          `method=editMessage`,
+          `chat=${chatId}`,
+          `msg=${msgId}`,
+          `timeout=${DEFAULT_API_TIMEOUT_MS}ms`,
+        );
+        return;
+      }
+      // HTML render failed — try plain text. Skip on AbortError to avoid
+      // doubling the timeout window. `parse_mode: undefined` is explicit so
+      // grammY's defaultParseMode transformer doesn't re-add HTML.
       try {
-        await this.raw['editMessageText']({
-          chat_id: chatId,
-          message_id: msgId,
-          text: chunk.text,
-          parse_mode: undefined,
-        });
+        await withAbortTimeout(
+          (signal) =>
+            editApi({ chat_id: chatId, message_id: msgId, text: chunk.text, parse_mode: undefined }, signal),
+          DEFAULT_API_TIMEOUT_MS,
+        );
       } catch (e2) {
+        if ((e2 as Error)?.name === 'AbortError') {
+          log.warn(
+            '[Telegram API TIMEOUT]',
+            `method=editMessage(plain)`,
+            `chat=${chatId}`,
+            `msg=${msgId}`,
+            `timeout=${DEFAULT_API_TIMEOUT_MS}ms`,
+          );
+          return;
+        }
         log.debug('[Telegram] editMessage failed:', (e2 as Error)?.message ?? e2);
       }
     }
@@ -608,19 +631,22 @@ export class TelegramClient implements Client {
       `msg=${msgId}`,
       `text=${JSON.stringify(summarizeTextForLog(truncated))}`,
     );
+    const effectiveTimeout = timeoutMs ?? DEFAULT_API_TIMEOUT_MS;
     try {
       const params = { chat_id: chatId, message_id: msgId, text: truncated, parse_mode: undefined as undefined };
-      if (timeoutMs) {
-        await withAbortTimeout(
-          (signal) => this.raw['editMessageText'](params as Parameters<typeof this.raw['editMessageText']>[0], signal) as Promise<unknown>,
-          timeoutMs,
-        );
-      } else {
-        await this.raw['editMessageText'](params as Parameters<typeof this.raw['editMessageText']>[0]);
-      }
+      await withAbortTimeout(
+        (signal) => this.raw['editMessageText'](params as Parameters<typeof this.raw['editMessageText']>[0], signal) as Promise<unknown>,
+        effectiveTimeout,
+      );
     } catch (e) {
       if ((e as Error)?.name === 'AbortError') {
-        log.warn('[Telegram API TIMEOUT]', `method=editMessageRaw`, `chat=${chatId}`, `msg=${msgId}`, `timeout=${timeoutMs}ms`);
+        log.warn(
+          '[Telegram API TIMEOUT]',
+          `method=editMessageRaw`,
+          `chat=${chatId}`,
+          `msg=${msgId}`,
+          `timeout=${effectiveTimeout}ms`,
+        );
         return;
       }
       log.debug('[Telegram] editMessageRaw failed:', (e as Error)?.message ?? e);
