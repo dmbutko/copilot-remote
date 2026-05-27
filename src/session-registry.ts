@@ -67,7 +67,9 @@ export class SessionRegistry {
     if (inflight) return inflight;
 
     const promise = this.startOrResume(chatId).finally(() => {
-      this.sessionStarts.delete(chatId);
+      if (this.sessionStarts.get(chatId) === promise) {
+        this.sessionStarts.delete(chatId);
+      }
     });
     this.sessionStarts.set(chatId, promise);
     return promise;
@@ -128,9 +130,12 @@ export class SessionRegistry {
     log.info('[registry:invalidate]', chatId, reason);
   }
 
-  /** Invalidate every live chat. Used by Fix 3 when a daemon-wide event makes all in-memory Sessions suspect. */
+  /**
+   * Invalidate every live OR in-flight chat. Iterates the union of `sessions`
+   * and `sessionStarts` keys so we don't miss a chat that's mid-start.
+   */
   invalidateAll(reason: string): void {
-    const keys = [...this.sessions.keys()];
+    const keys = new Set<string>([...this.sessions.keys(), ...this.sessionStarts.keys()]);
     for (const chatId of keys) this.invalidateChat(chatId, reason);
   }
 
