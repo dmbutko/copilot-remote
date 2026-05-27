@@ -794,7 +794,7 @@ export class Session extends EventEmitter {
         // old buttons stay clickable and could answer a future ask_user prompt.
         this.emit('user_input_timeout', { turnId: this.activeTurnId });
         resolve({ answer: '', wasFreeform: true }); // Empty response on timeout
-      }, 300_000); // 5 min timeout for user questions
+      }, 30_000); // 30s — short enough that an unanswered ask_user doesn't wedge the chat on mobile UX
     });
   }
 
