@@ -43,6 +43,33 @@ async function withAbortTimeout<T>(fn: (signal?: AbortSignal) => Promise<T>, ms:
  */
 const DEFAULT_API_TIMEOUT_MS = 30_000;
 
+/**
+ * Race a promise against a setTimeout. On timeout we abandon the awaited
+ * call and continue — the underlying HTTPS request may still complete in
+ * the background. Used for startup calls (`setMyCommands`, `deleteWebhook`,
+ * `getMe`) that go through grammY's `auto-retry` plugin which would otherwise
+ * retry indefinitely on transient Telegram failures and wedge daemon startup.
+ */
+async function withStartupTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race<T | null>([
+      promise.catch((e) => {
+        log.debug(`[Telegram] ${label} failed:`, (e as Error)?.message ?? e);
+        return null;
+      }),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => {
+          log.warn(`[Telegram] ${label} timed out after ${ms}ms — skipping`);
+          resolve(null);
+        }, ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 type MyContext = HydrateFlavor<FileFlavor<Context>>;
 
 export interface TelegramConfig {
@@ -391,9 +418,11 @@ export class TelegramClient implements Client {
   }
 
   async start(): Promise<void> {
-    // Register bot command menu
-    await this.bot.api
-      .setMyCommands([
+    // Register bot command menu. Wrapped because grammY's auto-retry plugin
+    // retries setMyCommands indefinitely on network errors, which can wedge
+    // startup forever during a Telegram flake (observed in production).
+    await withStartupTimeout(
+      this.bot.api.setMyCommands([
         { command: 'new', description: 'Start fresh session' },
         { command: 'attach', description: 'Attach a known Copilot session' },
         { command: 'config', description: 'Settings & preferences' },
@@ -415,8 +444,10 @@ export class TelegramClient implements Client {
         { command: 'files', description: 'List workspace files' },
         { command: 'skills', description: 'List available skills' },
         { command: 'mcp', description: 'MCP server status' },
-      ])
-      .catch(() => {});
+      ]),
+      10_000,
+      'setMyCommands',
+    );
 
     if (this.allowedUsers.size > 0) {
       log.info('[Telegram] Polling started — authorized users: ' + [...this.allowedUsers].join(', '));
@@ -429,8 +460,13 @@ export class TelegramClient implements Client {
 
     await this.checkInlineMode();
 
-    // Drop any stale getUpdates connections from previous instances
-    await this.bot.api.deleteWebhook({ drop_pending_updates: false }).catch(() => {});
+    // Drop any stale getUpdates connections from previous instances.
+    // Wrapped same as setMyCommands above — startup must not block forever.
+    await withStartupTimeout(
+      this.bot.api.deleteWebhook({ drop_pending_updates: false }),
+      10_000,
+      'deleteWebhook',
+    );
 
     // Retry loop: grammY treats 409 (stale getUpdates from previous instance) as unrecoverable.
     // On tsx watch restarts or daemon respawns, the old long-poll may still be in-flight for up to 30s.
@@ -822,8 +858,9 @@ export class TelegramClient implements Client {
    */
   async checkInlineMode(): Promise<void> {
     try {
-      const me = await this.bot.api.getMe();
-      if (!me.supports_inline_queries) return;
+      // Wrap getMe — auto-retry would otherwise wedge startup on Telegram flakes.
+      const me = await withStartupTimeout(this.bot.api.getMe(), 10_000, 'getMe(inline-check)');
+      if (!me || !me.supports_inline_queries) return;
       log.warn(
         '[Telegram] ⚠️  Inline mode is ENABLED at @BotFather but this bot does NOT service inline queries. ' +
           'Disable it via @BotFather → /setinline → Turn off.',
@@ -832,9 +869,11 @@ export class TelegramClient implements Client {
         '⚠️ Inline mode is ENABLED at @BotFather but this bot does not service inline queries. ' +
         'Disable it via @BotFather → /setinline → Turn off.';
       for (const userId of this.allowedUsers) {
-        await this.bot.api.sendMessage(userId, text).catch((err) => {
-          log.debug(`[Telegram] Failed to DM user ${userId} about inline mode:`, err);
-        });
+        await withStartupTimeout(
+          this.bot.api.sendMessage(userId, text),
+          10_000,
+          `sendMessage(inline-warn:${userId})`,
+        );
       }
     } catch (err) {
       log.debug('[Telegram] inline-mode check failed', err);
