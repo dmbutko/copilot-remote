@@ -32,11 +32,9 @@ function archivePaths() {
  * Owns the per-chat Session lifecycle:
  *   - the live `sessions` map (chatId → Session)
  *   - the per-chat `workDirs` map
- *   - getSession() with an in-flight Promise dedup lock to prevent two
- *     concurrent calls from racing to create duplicate Sessions for the
- *     same chat (Fix 2)
+ *   - getSession() with an in-flight Promise dedup lock so two concurrent
+ *     calls for the same chat share one Session
  *   - suspendSession / archiveSession
- *   - invalidateChat / invalidateAll for use by future Fix 3 (wedged-turn kill)
  */
 export class SessionRegistry {
   readonly sessions: Map<string, Session>;
@@ -117,26 +115,6 @@ export class SessionRegistry {
     this.deps.sessionStore.delete(chatId);
     this.resetResumeFailures(chatId);
     this.pruneArchives(ids, ARCHIVE_KEEP);
-  }
-
-  /**
-   * Drop a single chat's in-memory state. Used by the wedged-turn killer (Fix 3)
-   * and any future capability that needs to force a fresh Session on next message.
-   * Does NOT archive — disk state stays intact, next getSession resumes.
-   */
-  invalidateChat(chatId: string, reason: string): void {
-    this.suspendSession(chatId);
-    this.sessionStarts.delete(chatId);
-    log.info('[registry:invalidate]', chatId, reason);
-  }
-
-  /**
-   * Invalidate every live OR in-flight chat. Iterates the union of `sessions`
-   * and `sessionStarts` keys so we don't miss a chat that's mid-start.
-   */
-  invalidateAll(reason: string): void {
-    const keys = new Set<string>([...this.sessions.keys(), ...this.sessionStarts.keys()]);
-    for (const chatId of keys) this.invalidateChat(chatId, reason);
   }
 
   private async startOrResume(chatId: string): Promise<Session> {

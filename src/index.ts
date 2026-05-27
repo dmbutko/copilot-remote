@@ -272,15 +272,9 @@ async function main(): Promise<void> {
   const setPendingPerm = (chatId: string, msgId: number) => pendingPerms.add(pendingKey(chatId, msgId));
   const hasPendingPerm = (chatId: string, msgId: number) => pendingPerms.has(pendingKey(chatId, msgId));
   const clearPendingPerm = (chatId: string, msgId: number) => pendingPerms.delete(pendingKey(chatId, msgId));
-  const clearPendingPermsForChat = (chatId: string) => {
-    for (const k of pendingPerms) if (matchesChat(k, chatId)) pendingPerms.delete(k);
-  };
   const setPendingInput = (chatId: string, msgId: number) => pendingInputs.add(pendingKey(chatId, msgId));
   const hasPendingInput = (chatId: string, msgId: number) => pendingInputs.has(pendingKey(chatId, msgId));
   const clearPendingInput = (chatId: string, msgId: number) => pendingInputs.delete(pendingKey(chatId, msgId));
-  const clearPendingInputsForChat = (chatId: string) => {
-    for (const k of pendingInputs) if (matchesChat(k, chatId)) pendingInputs.delete(k);
-  };
   const threadMap = new Map<string, number>(); // sessionKey → threadId
   let shuttingDown = false;
   let pendingRestartReason: string | null = null;
