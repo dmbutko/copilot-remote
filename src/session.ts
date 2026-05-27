@@ -789,6 +789,10 @@ export class Session extends EventEmitter {
       timer = setTimeout(() => {
         timer = null;
         this.off('user_input_response', handler);
+        // Notify the bridge so it can sweep stale pendingInputs entries and
+        // edit any "❓ Question" buttons to show "⏰ Timed out". Without this,
+        // old buttons stay clickable and could answer a future ask_user prompt.
+        this.emit('user_input_timeout', { turnId: this.activeTurnId });
         resolve({ answer: '', wasFreeform: true }); // Empty response on timeout
       }, 300_000); // 5 min timeout for user questions
     });

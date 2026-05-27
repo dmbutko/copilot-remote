@@ -431,6 +431,20 @@ async function main(): Promise<void> {
         }, 8_000);
       }
     });
+    // SDK's handleUserInput times out after 5 min; without sweeping pendingInputs
+    // the old "❓ Question" buttons stay clickable and could answer a future
+    // ask_user prompt by mistake. Same pattern as permission_timeout above.
+    session.on('user_input_timeout', () => {
+      for (const k of pendingInputs) {
+        if (!matchesChat(k, chatId)) continue;
+        const id = Number(k.slice(chatId.length + 1));
+        pendingInputs.delete(k);
+        client.editButtons(chatId, id, '⏰ Timed out', []).catch(() => {});
+        setTimeout(() => {
+          client.deleteMessage?.(chatId, id).catch(() => {});
+        }, 8_000);
+      }
+    });
     session.on('notification', async (text: string) => {
       await client.sendMessage(chatId, `🔔 ${text}`);
     });
