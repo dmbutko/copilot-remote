@@ -20,14 +20,12 @@ export class MockTelegramHarness implements Client {
   onCallback?: Client['onCallback'];
   onReaction?: Client['onReaction'];
   onFile?: Client['onFile'];
-  onInlineQuery?: Client['onInlineQuery'];
 
   private rl: readline.Interface | null = null;
   private started = false;
   private startResolve: (() => void) | null = null;
   private nextMessageId = 1;
   private nextCallbackId = 1;
-  private nextInlineQueryId = 1;
   private nextDraftIdValue = 1;
   private currentChatId: string;
   private currentThreadId: number | undefined;
@@ -148,10 +146,6 @@ export class MockTelegramHarness implements Client {
     this.log('callback-answer', null, `${callbackId}${text ? ` ${text}` : ''}`);
   }
 
-  async answerInlineQuery(queryId: string, results: Record<string, unknown>[]): Promise<void> {
-    this.log('inline-answer', null, `${queryId} (${results.length} result(s))`);
-  }
-
   getTopicName(sessionKey: string): string | undefined {
     return this.topicNames.get(sessionKey);
   }
@@ -200,12 +194,6 @@ export class MockTelegramHarness implements Client {
     const fileName = path.basename(filePath);
     this.log('file-in', msgId, `${fileName}${caption ? ` — ${caption}` : ''}`);
     await this.onFile?.(fileId, fileName, caption, this.currentChatId, msgId, this.currentThreadId);
-  }
-
-  async simulateInlineQuery(query: string): Promise<void> {
-    const queryId = `mock-inline-${this.nextInlineQueryId++}`;
-    this.log('inline-in', null, query);
-    await this.onInlineQuery?.(queryId, query);
   }
 
   private async handleLine(rawLine: string): Promise<void> {
@@ -260,9 +248,6 @@ export class MockTelegramHarness implements Client {
       }
       case 'file':
         if (rest[0]) await this.simulateFile(rest[0], rest.slice(1).join(' '));
-        break;
-      case 'inline':
-        if (rest.length) await this.simulateInlineQuery(rest.join(' '));
         break;
       case 'quit':
       case 'exit':
@@ -324,7 +309,6 @@ export class MockTelegramHarness implements Client {
         '  /mock callback <msgId> <data>   simulate button press callback data',
         '  /mock reaction <msgId> <emoji>  simulate a user reaction',
         '  /mock file <path> [caption]     simulate a file upload',
-        '  /mock inline <query>            simulate an inline query',
         '  /mock quit                      exit the harness',
       ].join('\n'),
     );

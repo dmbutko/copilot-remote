@@ -74,7 +74,6 @@ export class TelegramClient implements Client {
   onCallback?: Client['onCallback'];
   onReaction?: Client['onReaction'];
   onFile?: Client['onFile'];
-  onInlineQuery?: Client['onInlineQuery'];
 
   /** Expose bot API for draft stream integration. */
   get api() {
@@ -359,12 +358,6 @@ export class TelegramClient implements Client {
       await ctx.answerCallbackQuery().catch(() => {});
     });
 
-    // Inline queries
-    this.bot.on('inline_query', async (ctx) => {
-      if (!ctx.inlineQuery.query?.trim()) return;
-      this.onInlineQuery?.(ctx.inlineQuery.id, ctx.inlineQuery.query.trim());
-    });
-
     // Reactions
     this.bot.on('message_reaction', async (ctx) => {
       const r = ctx.messageReaction;
@@ -426,6 +419,8 @@ export class TelegramClient implements Client {
       );
     }
 
+    await this.checkInlineMode();
+
     // Drop any stale getUpdates connections from previous instances
     await this.bot.api.deleteWebhook({ drop_pending_updates: false }).catch(() => {});
 
@@ -437,7 +432,7 @@ export class TelegramClient implements Client {
       this.runner = run(this.bot, {
         runner: {
           fetch: {
-            allowed_updates: ['message', 'callback_query', 'message_reaction', 'inline_query'],
+            allowed_updates: ['message', 'callback_query', 'message_reaction'],
           },
         },
       });
@@ -805,16 +800,36 @@ export class TelegramClient implements Client {
       .catch(() => {});
   }
 
-  async answerInlineQuery(queryId: string, results: Record<string, unknown>[]): Promise<void> {
-    await this.bot.api
-      .answerInlineQuery(queryId, results as unknown as Parameters<typeof this.bot.api.answerInlineQuery>[1], {
-        cache_time: 0,
-      })
-      .catch(() => {});
-  }
-
   getTopicName(sessionKey: string): string | undefined {
     return this.topicNames.get(sessionKey);
+  }
+
+  /**
+   * Inline-mode hygiene check. If the operator left "Inline Mode" enabled at @BotFather,
+   * Telegram will deliver `inline_query` updates to this bot. We don't service those updates
+   * (the inline handler was removed for security & perf reasons — answering them would spin up
+   * a one-shot Session per query, with no auth context). Warn loudly so the operator can turn
+   * inline off via @BotFather → /setinline → Turn off.
+   */
+  async checkInlineMode(): Promise<void> {
+    try {
+      const me = await this.bot.api.getMe();
+      if (!me.supports_inline_queries) return;
+      log.warn(
+        '[Telegram] ⚠️  Inline mode is ENABLED at @BotFather but this bot does NOT service inline queries. ' +
+          'Disable it via @BotFather → /setinline → Turn off.',
+      );
+      const text =
+        '⚠️ Inline mode is ENABLED at @BotFather but this bot does not service inline queries. ' +
+        'Disable it via @BotFather → /setinline → Turn off.';
+      for (const userId of this.allowedUsers) {
+        await this.bot.api.sendMessage(userId, text).catch((err) => {
+          log.debug(`[Telegram] Failed to DM user ${userId} about inline mode:`, err);
+        });
+      }
+    } catch (err) {
+      log.debug('[Telegram] inline-mode check failed', err);
+    }
   }
 
   // ── Internal ──

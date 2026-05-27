@@ -57,16 +57,6 @@ export function summarizeTelegramUpdate(update: Update): Record<string, unknown>
     };
   }
 
-  if (update.inline_query) {
-    return {
-      updateId: update.update_id,
-      kind: 'inline_query',
-      from: update.inline_query.from.id,
-      inlineQueryId: update.inline_query.id,
-      query: clip(update.inline_query.query ?? ''),
-    };
-  }
-
   if (update.message_reaction) {
     return {
       updateId: update.update_id,
@@ -94,7 +84,6 @@ export function summarizeTelegramApiCall(method: string, payload: Record<string,
     draftId: payload.draft_id,
     action: payload.action,
     callbackId: payload.callback_query_id,
-    inlineQueryId: payload.inline_query_id,
     parseMode: payload.parse_mode,
     text: getTextLike(payload.text) ? clip(String(payload.text)) : undefined,
     caption: getTextLike(payload.caption) ? clip(String(payload.caption)) : undefined,
@@ -109,7 +98,6 @@ export function summarizeTelegramApiResult(method: string, result: unknown): Rec
     msg: record.message_id,
     chat: (record.chat as { id?: number } | undefined)?.id,
     thread: record.message_thread_id,
-    inlineResultCount: Array.isArray(record) ? record.length : undefined,
   };
 }
 

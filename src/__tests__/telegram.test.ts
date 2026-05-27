@@ -599,3 +599,93 @@ describe('TelegramClient access control', () => {
     assert.equal(invoked, 0);
   });
 });
+
+describe('TelegramClient.checkInlineMode', () => {
+  it('warns and DMs each allowed user when supports_inline_queries is true', async () => {
+    const client = new TelegramClient({
+      botToken: 'test-token',
+      allowedUsers: ['111', '222'],
+    });
+    const { calls } = await createTelegramHarness(client, async (method) => {
+      if (method === 'getMe') {
+        return { ok: true, result: { ...TEST_BOT_INFO, supports_inline_queries: true } };
+      }
+      return undefined;
+    });
+
+    await client.checkInlineMode();
+
+    const dms = calls.filter(
+      (c) => c.method === 'sendMessage' && typeof c.payload.text === 'string' && (c.payload.text as string).includes('Inline mode is ENABLED'),
+    );
+    assert.equal(dms.length, 2);
+    assert.deepEqual(
+      dms.map((c) => String(c.payload.chat_id)).sort(),
+      ['111', '222'],
+    );
+  });
+
+  it('sends no warning when supports_inline_queries is false', async () => {
+    const client = new TelegramClient({
+      botToken: 'test-token',
+      allowedUsers: ['111'],
+    });
+    const { calls } = await createTelegramHarness(client, async (method) => {
+      if (method === 'getMe') {
+        return { ok: true, result: { ...TEST_BOT_INFO, supports_inline_queries: false } };
+      }
+      return undefined;
+    });
+
+    await client.checkInlineMode();
+
+    const dms = calls.filter(
+      (c) => c.method === 'sendMessage' && typeof c.payload.text === 'string' && (c.payload.text as string).includes('Inline mode is ENABLED'),
+    );
+    assert.equal(dms.length, 0);
+  });
+
+  it('swallows getMe failures without throwing', async () => {
+    const client = new TelegramClient({
+      botToken: 'test-token',
+      allowedUsers: ['111'],
+    });
+    await createTelegramHarness(client, async (method) => {
+      if (method === 'getMe') {
+        throw new Error('network down');
+      }
+      return undefined;
+    });
+
+    await assert.doesNotReject(() => client.checkInlineMode());
+  });
+});
+
+describe('TelegramClient.checkInlineMode partial failure', () => {
+  it('continues to DM remaining users when one sendMessage fails', async () => {
+    const client = new TelegramClient({
+      botToken: 'test-token',
+      allowedUsers: ['111', '222'],
+    });
+    const { calls } = await createTelegramHarness(client, async (method, payload) => {
+      if (method === 'getMe') {
+        return { ok: true, result: { ...TEST_BOT_INFO, supports_inline_queries: true } };
+      }
+      if (method === 'sendMessage' && String(payload.chat_id) === '111') {
+        throw new Error('user has not started DM');
+      }
+      return undefined;
+    });
+
+    await client.checkInlineMode();
+
+    const dmAttempts = calls.filter(
+      (c) =>
+        c.method === 'sendMessage' && typeof c.payload.text === 'string' && (c.payload.text as string).includes('Inline mode is ENABLED'),
+    );
+    assert.deepEqual(
+      dmAttempts.map((c) => String(c.payload.chat_id)).sort(),
+      ['111', '222'],
+    );
+  });
+});

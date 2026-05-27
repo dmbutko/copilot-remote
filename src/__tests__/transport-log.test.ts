@@ -58,7 +58,6 @@ describe('transport-log', () => {
         draftId: undefined,
         action: undefined,
         callbackId: undefined,
-        inlineQueryId: undefined,
         parseMode: 'HTML',
         text: 'hello world',
         caption: undefined,

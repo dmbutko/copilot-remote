@@ -52,7 +52,6 @@ export interface Client {
   answerCallback?(callbackId: string, text?: string, showAlert?: boolean): Promise<void>;
   editReplyMarkup?(chatId: string, messageId: number, buttons: Button[][]): Promise<void>;
   setMyProfilePhoto?(photoUrl: string): Promise<void>;
-  answerInlineQuery?(queryId: string, results: Record<string, unknown>[]): Promise<void>;
   getTopicName?(sessionKey: string): string | undefined;
 
   // Event handlers (set by bridge)
@@ -74,5 +73,4 @@ export interface Client {
     msgId: number,
     threadId?: number,
   ) => Promise<void>;
-  onInlineQuery?: (queryId: string, query: string) => Promise<void>;
 }
