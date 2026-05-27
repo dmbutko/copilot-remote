@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { atomicWriteSync } from './util/atomic-write.js';
 
 export interface InstanceOwner {
   pid: number;
@@ -54,7 +55,7 @@ function readOwner(lockDir: string): InstanceOwner | null {
 }
 
 function writeOwner(lockDir: string, owner: InstanceOwner): void {
-  fs.writeFileSync(ownerFilePath(lockDir), JSON.stringify(owner, null, 2) + '\n');
+  atomicWriteSync(ownerFilePath(lockDir), JSON.stringify(owner, null, 2) + '\n');
 }
 
 function removeLockDir(lockDir: string): void {

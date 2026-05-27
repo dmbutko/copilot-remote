@@ -2,9 +2,10 @@
 // Uses ~/.copilot/session-store.db for session metadata (shared with CLI)
 // Uses deterministic Telegram-derived session IDs by default.
 // Keeps ~/.copilot-remote/chat-sessions.json only for legacy migrations/fallback mappings.
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { readFileSync, mkdirSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { log } from './log.js';
+import { atomicWriteSync } from './util/atomic-write.js';
 
 // node:sqlite is experimental (Node 22 needs --experimental-sqlite, Node 23+ has it auto).
 // Make it optional so the app degrades gracefully — /sessions and /search lose
@@ -306,7 +307,7 @@ export class SessionStore {
   private saveChatMap(): void {
     try {
       mkdirSync(dirname(CHAT_MAP_PATH), { recursive: true });
-      writeFileSync(CHAT_MAP_PATH, JSON.stringify(this.chatMap, null, 2));
+      atomicWriteSync(CHAT_MAP_PATH, JSON.stringify(this.chatMap, null, 2));
     } catch {
       /* ignore */
     }
@@ -323,7 +324,7 @@ export class SessionStore {
   private saveWorkDirMap(): void {
     try {
       mkdirSync(dirname(WORK_DIR_PATH), { recursive: true });
-      writeFileSync(WORK_DIR_PATH, JSON.stringify(this.workDirMap, null, 2));
+      atomicWriteSync(WORK_DIR_PATH, JSON.stringify(this.workDirMap, null, 2));
     } catch {
       /* ignore */
     }

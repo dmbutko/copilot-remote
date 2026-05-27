@@ -48,6 +48,7 @@ import {
 } from './constants.js';
 import { sendConfigMenu, handleConfigCallback, type ConfigMenuDeps } from './config-menu.js';
 import * as fs from 'fs';
+import { atomicWriteSync } from './util/atomic-write.js';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import { createRequire } from 'module';
@@ -164,7 +165,7 @@ async function ensureBotToken(config: ReturnType<typeof loadConfig>): Promise<st
   const cfgDir = path.dirname(config._cfgPath);
   fs.mkdirSync(cfgDir, { recursive: true });
   const newFile = { ...config._file, botToken: token };
-  fs.writeFileSync(config._cfgPath, JSON.stringify(newFile, null, 2) + '\n', { mode: 0o600 });
+  atomicWriteSync(config._cfgPath, JSON.stringify(newFile, null, 2) + '\n', { mode: 0o600 });
   console.log(`\n✅ Saved to ${config._cfgPath}\n`);
   return token;
 }

@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import type { MCPServerConfig } from './mcp-config.js';
 import { log } from './log.js';
 import { resolveProviderConfig, type RemoteProviderConfig } from './provider-config.js';
+import { atomicWriteSync } from './util/atomic-write.js';
 
 const CONFIG_DIR = join(process.env.HOME ?? '.', '.copilot-remote');
 export const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
@@ -189,7 +190,7 @@ export class ConfigStore {
   private save(): void {
     try {
       if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true });
-      writeFileSync(CONFIG_FILE, JSON.stringify({ ...this.rawFile, ...this.global }, null, 2));
+      atomicWriteSync(CONFIG_FILE, JSON.stringify({ ...this.rawFile, ...this.global }, null, 2), { mode: 0o600 });
       log.info('[config] Saved to', CONFIG_FILE);
     } catch (e) {
       log.error('[config] Failed to save:', e);

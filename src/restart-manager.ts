@@ -1,7 +1,8 @@
-import { mkdirSync, readFileSync, rmSync, unwatchFile, watchFile, type Stats, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, unwatchFile, watchFile, type Stats } from 'node:fs';
 import path from 'node:path';
 import type { GlobalConfig } from './config-store.js';
 import { CONFIG_FILE } from './config-store.js';
+import { atomicWriteSync } from './util/atomic-write.js';
 
 export type SupervisorKind = 'launchd' | 'systemd' | null;
 
@@ -99,7 +100,7 @@ export function persistRestartNotice(
   },
   deps: {
     mkdirSync?: typeof mkdirSync;
-    writeFileSync?: typeof writeFileSync;
+    writeFile?: (filePath: string, data: string) => void;
     now?: () => number;
   } = {},
 ): RestartNotice | null {
@@ -113,10 +114,10 @@ export function persistRestartNotice(
   };
   const restartNoticePath = getRestartNoticePath(opts.homeDir);
   const mkdirSyncImpl = deps.mkdirSync ?? mkdirSync;
-  const writeFileSyncImpl = deps.writeFileSync ?? writeFileSync;
+  const writeFileImpl = deps.writeFile ?? ((p, d) => atomicWriteSync(p, d));
 
   mkdirSyncImpl(path.dirname(restartNoticePath), { recursive: true });
-  writeFileSyncImpl(restartNoticePath, JSON.stringify(notice, null, 2) + '\n');
+  writeFileImpl(restartNoticePath, JSON.stringify(notice, null, 2) + '\n');
   return notice;
 }
 
