@@ -135,6 +135,7 @@ function loadConfig() {
     provider,
     githubToken,
     profilePhoto: file.profilePhoto,
+    uploadDir: typeof file.uploadDir === 'string' ? file.uploadDir : undefined,
     _cfgPath: cfgPath ?? homeCfg,
     _file: file,
   };
@@ -2371,7 +2372,7 @@ async function main(): Promise<void> {
         logDebug: (message, error) => {
           log.debug(message, error);
         },
-        uploadDir: (config as Record<string, unknown>).uploadDir as string | undefined,
+        uploadDir: config.uploadDir,
       },
     );
   };
