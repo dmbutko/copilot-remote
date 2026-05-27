@@ -2336,11 +2336,11 @@ async function main(): Promise<void> {
   };
 
   // ── File handler — download and pass to Copilot ──
-  client.onFile = async (fileId, fileName, caption, rawChatId, msgId, threadId) => {
+  client.onFile = async (fileId, fileName, caption, rawChatId, msgId, threadId, senderId) => {
     const chatId = threadId ? sessionKey(rawChatId, threadId) : rawChatId;
     if (!client.getFileUrl) return;
     await handleIncomingFileUpload(
-      { fileId, fileName, caption, chatId, msgId },
+      { fileId, fileName, caption, chatId, msgId, senderId },
       {
         resolveFileUrl: (incomingFileId) => client.getFileUrl!(incomingFileId),
         download: async (url) => {

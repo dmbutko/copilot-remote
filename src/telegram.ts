@@ -120,6 +120,15 @@ export class TelegramClient implements Client {
     return this.bot.api.raw as RawApi;
   }
 
+  // Bridge-injected sender envelope: every inbound prompt's first line is
+  // `<sender>{telegram-id}</sender>`. Agents strip it (see stuff/AGENTS.md).
+  private senderEnvelope(ctx: Context): string {
+    return `<sender>${ctx.from?.id ?? 'unknown'}</sender>\n`;
+  }
+  private senderIdOf(ctx: Context): string {
+    return String(ctx.from?.id ?? 'unknown');
+  }
+
   constructor(private config: TelegramConfig) {
     this.bot = new Bot<MyContext>(config.botToken);
 
@@ -284,7 +293,7 @@ export class TelegramClient implements Client {
 
       // Do NOT await — let handlePrompt run in background so other updates process immediately
       void this.onMessage?.(
-        ctx.message.text,
+        this.senderEnvelope(ctx) + ctx.message.text,
         String(ctx.chatId),
         ctx.message.message_id,
         ctx.message.reply_to_message?.text,
@@ -309,7 +318,7 @@ export class TelegramClient implements Client {
         `caption=${JSON.stringify(summarizeTextForLog(caption))}`,
       );
       if (fileId) {
-        this.onFile?.(fileId, fileName, caption, String(ctx.chatId), msg.message_id, msg.message_thread_id);
+        this.onFile?.(fileId, fileName, caption, String(ctx.chatId), msg.message_id, msg.message_thread_id, this.senderIdOf(ctx));
       }
     });
 
@@ -326,7 +335,7 @@ export class TelegramClient implements Client {
         `thread=${threadId ?? '-'}`,
         `emoji=${JSON.stringify(emoji || '<none>')}`,
       );
-      this.onMessage?.(desc, String(ctx.chatId), ctx.message.message_id, undefined, undefined, threadId);
+      this.onMessage?.(this.senderEnvelope(ctx) + desc, String(ctx.chatId), ctx.message.message_id, undefined, undefined, threadId);
     });
 
     // Video and video notes → download and forward as file
@@ -345,7 +354,7 @@ export class TelegramClient implements Client {
         `file=${JSON.stringify(fileName)}`,
         `caption=${JSON.stringify(summarizeTextForLog(caption))}`,
       );
-      this.onFile?.(fileId, fileName, caption, String(ctx.chatId), msg.message_id, msg.message_thread_id);
+      this.onFile?.(fileId, fileName, caption, String(ctx.chatId), msg.message_id, msg.message_thread_id, this.senderIdOf(ctx));
     });
 
     // Location → forward as text
@@ -361,7 +370,7 @@ export class TelegramClient implements Client {
         `lat=${loc.latitude}`,
         `lon=${loc.longitude}`,
       );
-      this.onMessage?.(text, String(ctx.chatId), ctx.message.message_id, undefined, undefined, threadId);
+      this.onMessage?.(this.senderEnvelope(ctx) + text, String(ctx.chatId), ctx.message.message_id, undefined, undefined, threadId);
     });
 
     // Callback queries

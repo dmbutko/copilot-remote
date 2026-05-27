@@ -7,6 +7,7 @@ export interface IncomingFileContext {
   caption: string;
   chatId: string;
   msgId: number;
+  senderId?: string;
 }
 
 export interface FileIntakeDeps {
@@ -25,6 +26,12 @@ export const DEFAULT_UPLOAD_DIR = '/tmp/copilot-remote-files';
 
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
 const TRANSCRIBABLE_AUDIO_EXTENSIONS = ['.oga', '.ogg'];
+
+// Bridge-injected sender envelope (see telegram.ts + stuff/AGENTS.md).
+// Empty when senderId is undefined so unit-test fixtures stay valid.
+function senderEnvelope(senderId?: string): string {
+  return senderId ? `<sender>${senderId}</sender>\n` : '';
+}
 
 export function isImageFile(fileName: string): boolean {
   const lower = fileName.toLowerCase();
@@ -68,10 +75,10 @@ export async function handleIncomingFileUpload(ctx: IncomingFileContext, deps: F
       try {
         const transcript = await deps.transcribeAudio(tmpPath);
         if (transcript?.trim()) {
-          const prompt = ctx.caption
+          const body = ctx.caption
             ? `${ctx.caption}\n\n(Voice transcription: ${transcript.trim()})`
             : transcript.trim();
-          await deps.handlePrompt(ctx.chatId, ctx.msgId, prompt);
+          await deps.handlePrompt(ctx.chatId, ctx.msgId, senderEnvelope(ctx.senderId) + body);
           return;
         }
       } catch (error) {
@@ -82,15 +89,15 @@ export async function handleIncomingFileUpload(ctx: IncomingFileContext, deps: F
     const attachments: FileAttachment[] = [{ type: 'file', path: tmpPath, displayName }];
 
     if (isImageFile(ctx.fileName)) {
-      const prompt = ctx.caption || 'Describe this image.';
+      const prompt = senderEnvelope(ctx.senderId) + (ctx.caption || 'Describe this image.');
       await deps.handlePrompt(ctx.chatId, ctx.msgId, prompt, attachments);
       return;
     }
 
-    const prompt = ctx.caption
+    const body = ctx.caption
       ? `${ctx.caption}\n\n[Attached file: ${tmpPath}]`
       : `I sent you a file: ${tmpPath}\nPlease read and analyze it.`;
-    await deps.handlePrompt(ctx.chatId, ctx.msgId, prompt, attachments);
+    await deps.handlePrompt(ctx.chatId, ctx.msgId, senderEnvelope(ctx.senderId) + body, attachments);
   } catch (error) {
     await deps.sendMessage(ctx.chatId, '❌ ' + String(error));
   }

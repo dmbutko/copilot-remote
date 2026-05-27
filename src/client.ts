@@ -72,5 +72,6 @@ export interface Client {
     chatId: string,
     msgId: number,
     threadId?: number,
+    senderId?: string,
   ) => Promise<void>;
 }

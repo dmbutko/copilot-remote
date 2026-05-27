@@ -193,7 +193,7 @@ export class MockTelegramHarness implements Client {
     const fileId = `mock-file-${msgId}`;
     const fileName = path.basename(filePath);
     this.log('file-in', msgId, `${fileName}${caption ? ` — ${caption}` : ''}`);
-    await this.onFile?.(fileId, fileName, caption, this.currentChatId, msgId, this.currentThreadId);
+    await this.onFile?.(fileId, fileName, caption, this.currentChatId, msgId, this.currentThreadId, undefined);
   }
 
   private async handleLine(rawLine: string): Promise<void> {

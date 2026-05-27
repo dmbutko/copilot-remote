@@ -295,7 +295,7 @@ describe('TelegramClient grammY-style adapter tests', () => {
     );
 
     assert.deepEqual(seen, {
-      text: 'hello from grammY',
+      text: '<sender>1</sender>\nhello from grammY',
       chatId: '123',
       msgId: 10,
       replyText: 'older message',
@@ -495,7 +495,7 @@ describe('TelegramClient access control', () => {
     await bot.handleUpdate(makeTextUpdate({ messageId: 1, chatId: 111, fromId: 111, text: 'from user 111' }));
     await bot.handleUpdate(makeTextUpdate({ messageId: 2, chatId: 222, fromId: 222, text: 'from user 222' }));
 
-    assert.deepEqual(seen, ['from user 111', 'from user 222']);
+    assert.deepEqual(seen, ['<sender>111</sender>\nfrom user 111', '<sender>222</sender>\nfrom user 222']);
   });
 
   it('accepts messages from an allowed user across any chat context (no chat scoping)', async () => {
@@ -520,7 +520,11 @@ describe('TelegramClient access control', () => {
       makeTextUpdate({ messageId: 3, chatId: -1001234567890, fromId: 111, threadId: 42, text: 'topic' }),
     );
 
-    assert.deepEqual(seen, ['dm', 'other-chat', 'topic']);
+    assert.deepEqual(seen, [
+      '<sender>111</sender>\ndm',
+      '<sender>111</sender>\nother-chat',
+      '<sender>111</sender>\ntopic',
+    ]);
   });
 
   it('rejects messages from users not in allowedUsers', async () => {
