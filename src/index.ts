@@ -1365,9 +1365,17 @@ async function main(): Promise<void> {
     const key = sessionKey(chatId, threadId);
     if (threadId) threadMap.set(key, threadId);
 
+    // Telegram transport prepends a `<sender>{id}</sender>\n` envelope to every
+    // inbound prompt (see src/telegram.ts). Split it off so bridge-local routing
+    // (slash commands, yes/no perm replies, ask_user answers) matches on the
+    // raw body, while still forwarding the envelope on prompts that reach Copilot.
+    const envMatch = text.match(/^<sender>[^<]*<\/sender>\n/);
+    const envelope = envMatch ? envMatch[0] : '';
+    const body = envelope ? text.slice(envelope.length) : text;
+
     // Reply to permission message
     if (replyToMsgId && hasPendingPerm(key, replyToMsgId)) {
-      const lower = text.toLowerCase().trim();
+      const lower = body.toLowerCase().trim();
       const s = sessions.get(key);
       if (s?.alive) {
         if (['yes', 'y', 'approve', '👍'].includes(lower)) {
@@ -1389,20 +1397,20 @@ async function main(): Promise<void> {
       const s = sessions.get(key);
       if (s?.alive) {
         clearPendingInput(key, replyToMsgId);
-        s.answerInput(text);
+        s.answerInput(body);
         return;
       }
     }
 
-    if (text.startsWith('/')) return handleCommand(text, key, messageId);
+    if (body.startsWith('/')) return handleCommand(body, key, messageId, envelope);
 
-    let prompt = text;
-    if (replyText) prompt = 'Context (replying to):\n"""\n' + replyText + '\n"""\n\nMy message: ' + text;
-    await handlePrompt(key, messageId, prompt);
+    let prompt = body;
+    if (replyText) prompt = 'Context (replying to):\n"""\n' + replyText + '\n"""\n\nMy message: ' + body;
+    await handlePrompt(key, messageId, envelope + prompt);
   };
 
   // ── Command handler ──
-  async function handleCommand(text: string, chatId: string, msgId: number): Promise<void> {
+  async function handleCommand(text: string, chatId: string, msgId: number, envelope = ''): Promise<void> {
     const [rawCmd, ...args] = text.split(' ');
     const cmd = rawCmd.replace(/@\w+$/, ''); // strip @botname suffix
     const argStr = args.join(' ');
@@ -1426,7 +1434,7 @@ async function main(): Promise<void> {
           log.debug('Failed to select research agent:', e);
         }
       }
-      return handlePrompt(chatId, msgId, pc.prompt(argStr));
+      return handlePrompt(chatId, msgId, envelope + pc.prompt(argStr));
     }
 
     switch (cmd) {
@@ -2061,14 +2069,14 @@ async function main(): Promise<void> {
         content = content.replace(/\{\{(\w+)\}\}/g, (_, name) => {
           return vars[varIdx++] ?? '{{' + name + '}}';
         });
-        await handlePrompt(chatId, msgId, content);
+        await handlePrompt(chatId, msgId, envelope + content);
         break;
       }
       case '/plan': {
         const s = sessions.get(chatId);
         if (!s?.alive) {
           await getSession(chatId);
-          return handleCommand(text, chatId, msgId);
+          return handleCommand(text, chatId, msgId, envelope);
         }
         try {
           if (args[0] === 'show') {
@@ -2079,7 +2087,7 @@ async function main(): Promise<void> {
             await client.sendMessage(chatId, '🗑 Plan deleted.');
           } else if (argStr) {
             await s.setMode('plan');
-            await handlePrompt(chatId, msgId, argStr);
+            await handlePrompt(chatId, msgId, envelope + argStr);
           } else {
             const cur = await s.getMode();
             const next = cur === 'plan' ? 'interactive' : 'plan';
