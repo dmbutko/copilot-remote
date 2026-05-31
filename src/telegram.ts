@@ -432,6 +432,7 @@ export class TelegramClient implements Client {
     // startup forever during a Telegram flake (observed in production).
     await withStartupTimeout(
       this.bot.api.setMyCommands([
+        { command: 'ask', description: 'Quick side question (no history)' },
         { command: 'new', description: 'Start fresh session' },
         { command: 'attach', description: 'Attach a known Copilot session' },
         { command: 'config', description: 'Settings & preferences' },

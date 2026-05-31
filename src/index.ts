@@ -683,6 +683,7 @@ async function main(): Promise<void> {
     attachments?: FileAttachment[],
     attempt = 1,
     promptTraceId = createPromptTraceId(msgId),
+    opts?: { askMode?: boolean },
   ): Promise<void> {
     log.info(
       '[prompt:start]',
@@ -867,8 +868,9 @@ async function main(): Promise<void> {
       }
     }
     // Keep relay semantics simple: queue by default, and only steer an in-flight turn
-    // when the user explicitly opts into immediate mode.
-    if (session.busy && c.messageMode === 'immediate') {
+    // when the user explicitly opts into immediate mode. /ask must NOT steer — it needs
+    // its own queued turn so we can capture the user.message id and truncate atomically.
+    if (!opts?.askMode && session.busy && c.messageMode === 'immediate') {
       if (typingInterval) { clearInterval(typingInterval); typingInterval = null; }
       react('⚡');
       try {
@@ -1179,7 +1181,7 @@ async function main(): Promise<void> {
         `mode=${session.messageMode ?? 'enqueue'}`,
       );
       markTimeline('send', `mode=${session.messageMode ?? 'enqueue'}`);
-      res = await session.send(prompt, attachments, turnReservation);
+      res = await session.send(prompt, attachments, turnReservation, opts);
     } catch (sendErr) {
       log.error('[prompt:error]', sendErr);
       cleanup();
@@ -1220,7 +1222,7 @@ async function main(): Promise<void> {
           `chat=${chatId}`,
           `msg=${msgId}`,
         );
-        return handlePrompt(chatId, msgId, prompt, attachments, attempt + 1, promptTraceId);
+        return handlePrompt(chatId, msgId, prompt, attachments, attempt + 1, promptTraceId, opts);
       }
 
       // Kill the broken session so it doesn't linger
@@ -1252,7 +1254,7 @@ async function main(): Promise<void> {
           `msg=${msgId}`,
           'reason=session-evicted-from-memory',
         );
-        return handlePrompt(chatId, msgId, prompt, attachments, attempt + 1, promptTraceId);
+        return handlePrompt(chatId, msgId, prompt, attachments, attempt + 1, promptTraceId, opts);
       }
 
       if (errMsg.toLowerCase().includes('timeout')) {
@@ -2275,6 +2277,18 @@ async function main(): Promise<void> {
         await sendConfigMenu(chatId, configMenuDeps);
         break;
       }
+      case '/ask': {
+        if (!argStr) {
+          await client.sendMessage(chatId, 'Usage: `/ask <question>`\nAsk a quick side question — answered with current context, then removed from history.');
+          break;
+        }
+        let s = sessions.get(chatId);
+        if (!s?.alive) {
+          s = await getSession(chatId);
+        }
+        await handlePrompt(chatId, msgId, envelope + argStr, undefined, 1, undefined, { askMode: true });
+        break;
+      }
       case '/help':
       default: {
         await client.sendMessage(
@@ -2298,6 +2312,7 @@ async function main(): Promise<void> {
             '',
             '*💻 Coding*',
             '`/research <topic>` — Deep research',
+            '`/ask <question>` — Quick side question (no history)',
             '`/diff` — Show uncommitted changes',
             '`/review` — Code review current changes',
             '`/init` — Generate copilot-instructions.md',

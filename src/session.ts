@@ -808,12 +808,20 @@ export class Session extends EventEmitter {
     prompt: string,
     attachments?: FileAttachment[],
     reservation = this.reserveTurn(),
+    opts?: { askMode?: boolean },
   ): Promise<CopilotMessage> {
     if (!this._alive) throw new Error('Session not started');
 
     return this.runInSendQueue(async () => {
       let onDelta: ((event: SessionStreamEvent) => void) | null = null;
       let errorHandler: ((msg: string) => void) | null = null;
+
+      let askUserMsgId: string | null = null;
+      const unsubscribeAskUserMsg = opts?.askMode
+        ? this.session!.on('user.message', (ev) => {
+            if (!askUserMsgId) askUserMsgId = ev.id;
+          })
+        : null;
 
       try {
         this.activeSendReservation = reservation;
@@ -843,6 +851,7 @@ export class Session extends EventEmitter {
             attachments: attachments?.length ?? 0,
             promptChars: prompt.length,
             turnTimeoutMs: this._turnTimeoutMs ?? 'sdk-default',
+            askMode: opts?.askMode ? true : undefined,
           }),
         );
 
@@ -879,8 +888,28 @@ export class Session extends EventEmitter {
         }
         if (onDelta) this.off('delta_event', onDelta);
         if (errorHandler) this.off('error', errorHandler);
+        // /ask: drop the ask turn (user msg + assistant reply + tool events) from session history
+        // so it doesn't pollute future context. Best-effort; truncate is @experimental in SDK.
+        if (opts?.askMode && askUserMsgId) {
+          try {
+            const r = await this.session!.rpc.history.truncate({ eventId: askUserMsgId });
+            log.info('[ask] truncated history', ...formatLogFields({ eventsRemoved: r.eventsRemoved }));
+          } catch (e) {
+            log.warn('[ask] history.truncate failed:', e);
+          }
+        }
+        unsubscribeAskUserMsg?.();
       }
     });
+  }
+
+  /** Send a side question whose user message and response are removed from session history. */
+  async ask(
+    prompt: string,
+    attachments?: FileAttachment[],
+    reservation = this.reserveTurn(),
+  ): Promise<CopilotMessage> {
+    return this.send(prompt, attachments, reservation, { askMode: true });
   }
 
   /** Send with mode: 'immediate' to steer the agent mid-turn (bypasses queue) */

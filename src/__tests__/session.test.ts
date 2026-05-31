@@ -4,14 +4,18 @@ import { Session } from '../session.js';
 import type { AssistantPlanEvent } from '../session.js';
 
 type FakeEventHandler = (event: unknown) => void;
+type FakeTypedHandler = (event: any) => void;
 
 interface FakeSdkSession {
   sessionId: string;
   sendCalls: Array<Record<string, unknown>>;
   sendAndWaitCalls: Array<Record<string, unknown>>;
-  on: (handler: FakeEventHandler) => () => void;
+  truncateCalls: Array<{ eventId: string }>;
+  on: (typeOrHandler: string | FakeEventHandler, maybeHandler?: FakeTypedHandler) => () => void;
+  emit: (event: { type: string; id?: string; [k: string]: unknown }) => void;
   send: (opts: Record<string, unknown>) => Promise<void>;
   sendAndWait: (opts: Record<string, unknown>, timeout: number) => Promise<unknown>;
+  rpc: { history: { truncate: (params: { eventId: string }) => Promise<{ eventsRemoved: number }> } };
 }
 
 function createTestSession() {
@@ -24,16 +28,31 @@ function createFakeSdkSession(
   impl?: (opts: Record<string, unknown>, timeout: number) => Promise<unknown>,
 ): FakeSdkSession {
   const handlers = new Set<FakeEventHandler>();
+  const typedHandlers = new Map<string, Set<FakeTypedHandler>>();
+  const truncateCalls: Array<{ eventId: string }> = [];
 
   return {
     sessionId: 'fake-session-id',
     sendCalls: [],
     sendAndWaitCalls: [],
-    on(handler: FakeEventHandler) {
+    truncateCalls,
+    on(typeOrHandler, maybeHandler) {
+      if (typeof typeOrHandler === 'string' && maybeHandler) {
+        const set = typedHandlers.get(typeOrHandler) ?? new Set<FakeTypedHandler>();
+        set.add(maybeHandler);
+        typedHandlers.set(typeOrHandler, set);
+        return () => set.delete(maybeHandler);
+      }
+      const handler = typeOrHandler as FakeEventHandler;
       handlers.add(handler);
       return () => {
         handlers.delete(handler);
       };
+    },
+    emit(event) {
+      for (const h of handlers) h(event);
+      const set = typedHandlers.get(event.type);
+      if (set) for (const h of set) h(event);
     },
     async send(opts: Record<string, unknown>) {
       this.sendCalls.push(opts);
@@ -41,6 +60,14 @@ function createFakeSdkSession(
     async sendAndWait(opts: Record<string, unknown>, timeout: number) {
       this.sendAndWaitCalls.push(opts);
       return impl ? impl(opts, timeout) : { data: { content: `final:${String(opts.prompt ?? '')}` } };
+    },
+    rpc: {
+      history: {
+        async truncate(params: { eventId: string }) {
+          truncateCalls.push(params);
+          return { eventsRemoved: 1 };
+        },
+      },
     },
   };
 }
@@ -73,6 +100,96 @@ describe('Session', () => {
       mode: 'immediate',
       attachments,
     });
+  });
+
+  it('ask captures the user.message id during the turn and truncates history after sendAndWait', async () => {
+    const session = createTestSession();
+    let captured: FakeSdkSession | null = null;
+    const sdk = createFakeSdkSession(async (opts) => {
+      // Emit the user.message event mid-send — exactly when the SDK would surface it.
+      captured!.emit({ type: 'user.message', id: 'evt-user-42' });
+      return { data: { content: `final:${String(opts.prompt ?? '')}` } };
+    });
+    captured = sdk;
+    session.session = sdk;
+
+    const result = await session.ask('what time is it?');
+
+    assert.equal(result.content, 'final:what time is it?');
+    assert.equal(sdk.sendAndWaitCalls.length, 1);
+    assert.deepEqual(sdk.truncateCalls, [{ eventId: 'evt-user-42' }]);
+  });
+
+  it('ask captures only the first user.message id if multiple fire', async () => {
+    const session = createTestSession();
+    let captured: FakeSdkSession | null = null;
+    const sdk = createFakeSdkSession(async () => {
+      captured!.emit({ type: 'user.message', id: 'first-id' });
+      captured!.emit({ type: 'user.message', id: 'second-id' });
+      return { data: { content: 'ok' } };
+    });
+    captured = sdk;
+    session.session = sdk;
+
+    await session.ask('q');
+
+    assert.deepEqual(sdk.truncateCalls, [{ eventId: 'first-id' }]);
+  });
+
+  it('ask still truncates if sendAndWait throws after user.message was captured', async () => {
+    const session = createTestSession();
+    let captured: FakeSdkSession | null = null;
+    const sdk = createFakeSdkSession(async () => {
+      captured!.emit({ type: 'user.message', id: 'evt-user-99' });
+      throw new Error('boom');
+    });
+    captured = sdk;
+    session.session = sdk;
+
+    await assert.rejects(() => session.ask('q'), /boom/);
+    assert.deepEqual(sdk.truncateCalls, [{ eventId: 'evt-user-99' }]);
+  });
+
+  it('ask does not truncate when no user.message event fires (e.g. early failure)', async () => {
+    const session = createTestSession();
+    const sdk = createFakeSdkSession(async () => {
+      throw new Error('early failure');
+    });
+    session.session = sdk;
+
+    await assert.rejects(() => session.ask('q'), /early failure/);
+    assert.deepEqual(sdk.truncateCalls, []);
+  });
+
+  it('ask swallows truncate errors so the user still gets the answer', async () => {
+    const session = createTestSession();
+    let captured: FakeSdkSession | null = null;
+    const sdk = createFakeSdkSession(async () => {
+      captured!.emit({ type: 'user.message', id: 'evt-user-7' });
+      return { data: { content: 'answer' } };
+    });
+    captured = sdk;
+    sdk.rpc.history.truncate = async () => {
+      throw new Error('truncate exploded');
+    };
+    session.session = sdk;
+
+    const result = await session.ask('q');
+    assert.equal(result.content, 'answer');
+  });
+
+  it('send without askMode never touches truncate', async () => {
+    const session = createTestSession();
+    let captured: FakeSdkSession | null = null;
+    const sdk = createFakeSdkSession(async () => {
+      captured!.emit({ type: 'user.message', id: 'should-not-be-used' });
+      return { data: { content: 'ok' } };
+    });
+    captured = sdk;
+    session.session = sdk;
+
+    await session.send('hello');
+    assert.deepEqual(sdk.truncateCalls, []);
   });
 
   it('serializes queued sends and isolates streamed events by reserved turn', async () => {
