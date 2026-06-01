@@ -216,4 +216,94 @@ describe('handleIncomingFileUpload', () => {
 
     assert.ok(directories[0]?.includes('-100123456'));
   });
+
+  // Regression tests for the May-27 envelope rollout. file-intake produces
+  // prompts that reach Copilot, so each prompt MUST begin with the
+  // `<sender>{id}</sender>\n` envelope when senderId is supplied (the
+  // production path always sets it). See src/inbound-envelope.ts.
+  describe('sender envelope prepending', () => {
+    it('prepends <sender> envelope to image-caption prompt when senderId is set', async () => {
+      const { deps, prompts } = createDeps();
+
+      await handleIncomingFileUpload(
+        {
+          fileId: 'file-1',
+          fileName: 'diagram.png',
+          caption: 'what is this?',
+          chatId: 'chat-1',
+          msgId: 1,
+          senderId: '880903035',
+        },
+        deps,
+      );
+
+      assert.equal(prompts.length, 1);
+      assert.ok(
+        prompts[0]?.prompt.startsWith('<sender>880903035</sender>\n'),
+        `expected envelope as line 1, got: ${JSON.stringify(prompts[0]?.prompt.slice(0, 60))}`,
+      );
+      assert.ok(prompts[0]?.prompt.endsWith('what is this?'));
+    });
+
+    it('prepends <sender> envelope to plain-file prompt when senderId is set', async () => {
+      const { deps, prompts } = createDeps();
+
+      await handleIncomingFileUpload(
+        {
+          fileId: 'file-1',
+          fileName: 'report.pdf',
+          caption: 'Check this',
+          chatId: 'chat-1',
+          msgId: 1,
+          senderId: '769243474',
+        },
+        deps,
+      );
+
+      assert.equal(prompts.length, 1);
+      assert.ok(
+        prompts[0]?.prompt.startsWith('<sender>769243474</sender>\n'),
+        `expected envelope as line 1`,
+      );
+    });
+
+    it('prepends <sender> envelope to voice transcription prompt when senderId is set', async () => {
+      const { deps, prompts } = createDeps({
+        async transcribeAudio() {
+          return 'remind me to call mum';
+        },
+      });
+
+      await handleIncomingFileUpload(
+        {
+          fileId: 'file-1',
+          fileName: 'voice.oga',
+          caption: '',
+          chatId: 'chat-1',
+          msgId: 1,
+          senderId: '880903035',
+        },
+        deps,
+      );
+
+      assert.equal(prompts.length, 1);
+      assert.ok(
+        prompts[0]?.prompt.startsWith('<sender>880903035</sender>\n'),
+        `expected envelope as line 1`,
+      );
+      assert.ok(prompts[0]?.prompt.includes('remind me to call mum'));
+    });
+
+    it('omits envelope when senderId is undefined (test-fixture path)', async () => {
+      const { deps, prompts } = createDeps();
+
+      await handleIncomingFileUpload(
+        { fileId: 'file-1', fileName: 'diagram.png', caption: '', chatId: 'chat-1', msgId: 1 },
+        deps,
+      );
+
+      assert.equal(prompts.length, 1);
+      assert.ok(!prompts[0]?.prompt.startsWith('<sender>'));
+    });
+  });
 });

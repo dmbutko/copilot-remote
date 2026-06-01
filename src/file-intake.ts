@@ -1,5 +1,6 @@
 import path from 'node:path';
 import type { FileAttachment } from './session.js';
+import { buildSenderEnvelope } from './inbound-envelope.js';
 
 export interface IncomingFileContext {
   fileId: string;
@@ -30,7 +31,7 @@ const TRANSCRIBABLE_AUDIO_EXTENSIONS = ['.oga', '.ogg'];
 // Bridge-injected sender envelope (see telegram.ts + stuff/AGENTS.md).
 // Empty when senderId is undefined so unit-test fixtures stay valid.
 function senderEnvelope(senderId?: string): string {
-  return senderId ? `<sender>${senderId}</sender>\n` : '';
+  return senderId ? buildSenderEnvelope(senderId) : '';
 }
 
 export function isImageFile(fileName: string): boolean {

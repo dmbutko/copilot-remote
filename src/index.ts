@@ -20,6 +20,7 @@ import { handleAgentCallback } from './agent-menu.js';
 import { attachSessionById, formatSessionIdMessage, handleSessionCallback } from './session-menu.js';
 import { handleCdCommand } from './cd-command.js';
 import { handleIncomingFileUpload } from './file-intake.js';
+import { splitEnvelope } from './inbound-envelope.js';
 import { log } from './log.js';
 import { formatPromptLogText } from './prompt-log.js';
 import { formatPromptTimeline, type PromptTimelineEntry } from './prompt-timeline.js';
@@ -1367,13 +1368,11 @@ async function main(): Promise<void> {
     const key = sessionKey(chatId, threadId);
     if (threadId) threadMap.set(key, threadId);
 
-    // Telegram transport prepends a `<sender>{id}</sender>\n` envelope to every
-    // inbound prompt (see src/telegram.ts). Split it off so bridge-local routing
-    // (slash commands, yes/no perm replies, ask_user answers) matches on the
-    // raw body, while still forwarding the envelope on prompts that reach Copilot.
-    const envMatch = text.match(/^<sender>[^<]*<\/sender>\n/);
-    const envelope = envMatch ? envMatch[0] : '';
-    const body = envelope ? text.slice(envelope.length) : text;
+    // Strip the Telegram transport's `<sender>{id}</sender>\n` envelope so
+    // bridge-local routing (slash commands, yes/no perm replies, ask_user
+    // answers) matches on the raw body. Envelope is re-prepended on prompts
+    // that reach Copilot. See `src/inbound-envelope.ts`.
+    const { envelope, body } = splitEnvelope(text);
 
     // Reply to permission message
     if (replyToMsgId && hasPendingPerm(key, replyToMsgId)) {

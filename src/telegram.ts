@@ -11,6 +11,7 @@ import { markdownToHtml, markdownToText, markdownToTelegramChunks } from './form
 import { toTelegramReaction } from './emoji.js';
 import { log } from './log.js';
 import type { Client, MessageOptions, Button } from './client.js';
+import { buildSenderEnvelope } from './inbound-envelope.js';
 import {
   formatLogFields,
   summarizeTelegramApiCall,
@@ -123,7 +124,7 @@ export class TelegramClient implements Client {
   // Bridge-injected sender envelope: every inbound prompt's first line is
   // `<sender>{telegram-id}</sender>`. Agents strip it (see stuff/AGENTS.md).
   private senderEnvelope(ctx: Context): string {
-    return `<sender>${ctx.from?.id ?? 'unknown'}</sender>\n`;
+    return buildSenderEnvelope(this.senderIdOf(ctx));
   }
   private senderIdOf(ctx: Context): string {
     return String(ctx.from?.id ?? 'unknown');

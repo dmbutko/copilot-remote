@@ -38,10 +38,20 @@
   for examples.
 - Telegram transport prepends a `<sender>{telegramId}</sender>\n`
   envelope to every inbound text. `onMessage` in `src/index.ts` strips
-  it before routing bridge-local decisions (slash commands, yes/no
-  permission replies, ask_user freeform answers) and re-prepends it on
-  prompts that reach Copilot. Symbols to grep:
-  `TelegramClient.senderEnvelope`, `client.onMessage`.
+  it via `splitEnvelope` from `src/inbound-envelope.ts` before routing
+  bridge-local decisions (slash commands, yes/no permission replies,
+  ask_user freeform answers) and re-prepends it on prompts that reach
+  Copilot. Symbols to grep: `buildSenderEnvelope`, `splitEnvelope`,
+  `client.onMessage`, `SENDER_ENVELOPE_REGEX`.
+- **When you change inbound message transformation (envelope, prefix,
+  prepend, anything touching `text` before it reaches `onMessage`):**
+  also survey ALL consumers — `client.onMessage` routing in
+  `src/index.ts`, `handleCommand`, `handlePrompt`, `s.answerInput`,
+  `client.onFile` + `handleIncomingFileUpload`. Update + run
+  `src/__tests__/inbound-envelope.test.ts` and the matching
+  file-intake tests. Looking at the transport alone is how the
+  May-27 `/config` regression shipped (commit `3ea8cc1` → fix
+  `2970645`).
 
 ## Logs (two sources — both useful)
 
