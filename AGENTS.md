@@ -17,6 +17,15 @@
   with an in-flight debounce.
 - `npm test` = `tsx --test src/**/*.test.ts` (~10 s). Pre-existing lint
   errors are noise.
+- **Approval discipline (from `~/stuff/AGENTS.md` "Code Changes" rule):**
+  obtain explicit user approval before any code change. If the user
+  approves a scoped set of items (e.g. "do items 1-3 + 5"), stay within
+  that scope. Centralizing helpers, refactoring sibling files, or
+  extracting modules are SEPARATE changes that require their own
+  approval — even when "byte-equivalent" or "obviously good". `npm run
+  build` deploys live, so scope creep ships before review. Process
+  breach on 2026-06-01 (commit `3d12536`) was ratified one-time; future
+  unapproved expansions must be reverted, not ratified.
 - `~/.copilot-remote/config.json` contains the bot token and other
   secrets. **Never** `cat` the whole file in shared/log output —
   inspect specific keys only.

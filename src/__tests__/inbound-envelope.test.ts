@@ -85,12 +85,20 @@ describe('splitEnvelope', () => {
     assert.equal(body, 'line 1\nline 2\nline 3');
   });
 
-  // Regression tests for the May-27 /config breakage. The bug was that
-  // bridge-local routing switched on the wrapped text, so `text.startsWith('/')`
-  // returned false. These assertions pin the contract: after splitEnvelope,
-  // body must look like what the user actually typed, ready for the existing
-  // routing branches.
-  describe('regression: bridge-local routing preconditions', () => {
+  // The following tests are NOT proper routing tests. They prove that
+  // splitEnvelope() returns a body that satisfies the preconditions
+  // bridge-local routing depends on (startsWith('/'), lowercase 'yes',
+  // etc). They do NOT prove that onMessage actually dispatches /config
+  // to handleCommand instead of handlePrompt — that requires extracting
+  // the routing decision out of the runBot() closure in src/index.ts,
+  // which is a larger refactor pending separate approval.
+  //
+  // Coverage gap: the May-27 bug could theoretically recur if a future
+  // change keeps splitEnvelope() correct but breaks the dispatch in
+  // onMessage. Until proper routing tests exist, manual smoke test
+  // (type /config in Telegram after any inbound-handling change) is the
+  // backstop.
+  describe('regression: post-split body satisfies routing preconditions', () => {
     it('body of a /config message starts with "/" (slash-command routing fix)', () => {
       const { body } = splitEnvelope('<sender>880903035</sender>\n/config');
       assert.ok(body.startsWith('/'), 'body must look like a slash command');
