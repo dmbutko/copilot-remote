@@ -189,8 +189,12 @@ export class TelegramClient implements Client {
         // `result.result ?? result`, which discarded the envelope and hardcoded `ok:true`,
         // hiding all `BUTTON_DATA_INVALID` / `chat not found` / etc. failures from logs.
         const rxSummary = summarizeTelegramApiResult(method, result);
-        const rxLogLevel = rxSummary.ok === false ? 'warn' : 'verbose';
-        log[rxLogLevel]('[Telegram API RX]', ...formatLogFields({ ...rxSummary, ms: Date.now() - startedAt }));
+        const rxFields = formatLogFields({ ...rxSummary, ms: Date.now() - startedAt });
+        if (rxSummary.ok === false) {
+          log.warn('[Telegram API RX]', ...rxFields);
+        } else {
+          log.verbose('[Telegram API RX]', ...rxFields);
+        }
         if (log.shouldLog('debug')) {
           log.debug('[Telegram API RX RAW]', `method=${method}`, `result=${JSON.stringify(result)}`);
         }
@@ -1024,7 +1028,13 @@ export class TelegramClient implements Client {
       row.map((btn) => {
         const byteLen = Buffer.byteLength(btn.data, 'utf8');
         if (byteLen > TELEGRAM_CALLBACK_DATA_MAX_BYTES) {
-          const kind = btn.data.split(':')[0] ?? btn.data.slice(0, 16);
+          // Skip the `@<chatId>|` routing prefix (when present) so the logged kind reflects
+          // the action namespace (e.g. `input`, `session`, `prompt`), not the chat ID.
+          const payload =
+            btn.data.startsWith('@') && btn.data.includes('|')
+              ? btn.data.slice(btn.data.indexOf('|') + 1)
+              : btn.data;
+          const kind = payload.split(':', 1)[0] || '<unknown>';
           log.warn(
             '[Telegram] callback_data exceeds 64-byte limit',
             `bytes=${byteLen}`,

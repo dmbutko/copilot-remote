@@ -761,7 +761,7 @@ describe('sendButtons — callback_data 64-byte guard', () => {
     assert.equal(guardWarnings.length, 1, `expected one guard warning, got ${guardWarnings.length}`);
     const fields = guardWarnings[0]?.join(' ') ?? '';
     assert.ok(/bytes=\d+/.test(fields), `expected bytes=N in warning, got: ${fields}`);
-    assert.ok(fields.includes('kind='), `expected kind= field in warning, got: ${fields}`);
+    assert.ok(fields.includes('kind="input"'), `expected kind="input" (stripping @chatId routing prefix), got: ${fields}`);
   });
 
   it('does not warn when all callback_data are at or under 64 bytes', async () => {
