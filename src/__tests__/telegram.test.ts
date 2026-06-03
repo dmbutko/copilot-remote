@@ -733,3 +733,58 @@ describe('withAbortTimeout', () => {
     assert.equal(observedSignal.aborted, false);
   });
 });
+
+describe('sendButtons — callback_data 64-byte guard', () => {
+  it('warns when any button callback_data exceeds 64 bytes', async () => {
+    const client = new TelegramClient({
+      botToken: 'test-token',
+      allowedUsers: [],
+    });
+    await createTelegramHarness(client);
+
+    const { log } = await import('../log.js');
+    const originalWarn = log.warn;
+    const warnings: string[][] = [];
+    log.warn = (...args: unknown[]) => {
+      warnings.push(args.map((a) => String(a)));
+    };
+
+    try {
+      // Group thread session key (`-1003730545815:33`) + long choice text → > 64 bytes
+      const longButton = '@-1003730545815:33|input:Numbers for 12/3/6/9 + small markers between';
+      await client.sendButtons('-1003730545815', 'Choose:', [[{ text: 'Long choice', data: longButton }]], 33);
+    } finally {
+      log.warn = originalWarn;
+    }
+
+    const guardWarnings = warnings.filter((w) => w.some((s) => s.includes('callback_data exceeds 64-byte limit')));
+    assert.equal(guardWarnings.length, 1, `expected one guard warning, got ${guardWarnings.length}`);
+    const fields = guardWarnings[0]?.join(' ') ?? '';
+    assert.ok(/bytes=\d+/.test(fields), `expected bytes=N in warning, got: ${fields}`);
+    assert.ok(fields.includes('kind='), `expected kind= field in warning, got: ${fields}`);
+  });
+
+  it('does not warn when all callback_data are at or under 64 bytes', async () => {
+    const client = new TelegramClient({
+      botToken: 'test-token',
+      allowedUsers: [],
+    });
+    await createTelegramHarness(client);
+
+    const { log } = await import('../log.js');
+    const originalWarn = log.warn;
+    const warnings: string[][] = [];
+    log.warn = (...args: unknown[]) => {
+      warnings.push(args.map((a) => String(a)));
+    };
+
+    try {
+      await client.sendButtons('123', 'Choose:', [[{ text: 'Short', data: 'input:0' }]]);
+    } finally {
+      log.warn = originalWarn;
+    }
+
+    const guardWarnings = warnings.filter((w) => w.some((s) => s.includes('callback_data exceeds 64-byte limit')));
+    assert.equal(guardWarnings.length, 0);
+  });
+});

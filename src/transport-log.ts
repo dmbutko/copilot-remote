@@ -91,13 +91,27 @@ export function summarizeTelegramApiCall(method: string, payload: Record<string,
 }
 
 export function summarizeTelegramApiResult(method: string, result: unknown): Record<string, unknown> {
-  const record = (result as Record<string, unknown>) ?? {};
+  const envelope = (result ?? {}) as Record<string, unknown>;
+  // Telegram API responses come as `{ok:true, result:<Message>}` or `{ok:false, error_code, description, ...}`.
+  // The transformer chain may pass either the raw envelope or an already-unwrapped Message,
+  // depending on which layer is logging — handle both.
+  if (envelope.ok === false) {
+    const description = typeof envelope.description === 'string' ? envelope.description : undefined;
+    return {
+      method,
+      ok: false,
+      errorCode: envelope.error_code,
+      description: description ? clip(description, 200) : undefined,
+    };
+  }
+  const message =
+    (envelope.result as Record<string, unknown> | undefined) ?? (envelope as Record<string, unknown>);
   return {
     method,
     ok: true,
-    msg: record.message_id,
-    chat: (record.chat as { id?: number } | undefined)?.id,
-    thread: record.message_thread_id,
+    msg: message.message_id,
+    chat: (message.chat as { id?: number } | undefined)?.id,
+    thread: message.message_thread_id,
   };
 }
 

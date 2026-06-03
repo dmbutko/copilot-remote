@@ -62,6 +62,9 @@ export async function withAbortTimeout<T>(fn: (signal?: AbortSignal) => Promise<
  */
 const DEFAULT_API_TIMEOUT_MS = 30_000;
 
+/** Telegram's hard limit on `callback_data` byte length. Exceeding it makes Telegram reject the entire keyboard with `BUTTON_DATA_INVALID`. */
+const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
+
 /**
  * Timeout for fire-and-forget UX calls (reactions, typing indicators). These
  * are silent-failure-safe — dropping the 👀 reaction or a typing-dot frame
@@ -181,8 +184,13 @@ export class TelegramClient implements Client {
       }
       try {
         const result = await prev(method, payload, signal);
-        const rxSummary = summarizeTelegramApiResult(method, (result as { result?: unknown })?.result ?? result);
-        log.verbose('[Telegram API RX]', ...formatLogFields({ ...rxSummary, ms: Date.now() - startedAt }));
+        // Pass raw `result` so summarizeTelegramApiResult can detect `{ok:false, ...}` envelopes
+        // that grammY will throw on AFTER this transformer returns. Previously we passed
+        // `result.result ?? result`, which discarded the envelope and hardcoded `ok:true`,
+        // hiding all `BUTTON_DATA_INVALID` / `chat not found` / etc. failures from logs.
+        const rxSummary = summarizeTelegramApiResult(method, result);
+        const rxLogLevel = rxSummary.ok === false ? 'warn' : 'verbose';
+        log[rxLogLevel]('[Telegram API RX]', ...formatLogFields({ ...rxSummary, ms: Date.now() - startedAt }));
         if (log.shouldLog('debug')) {
           log.debug('[Telegram API RX RAW]', `method=${method}`, `result=${JSON.stringify(result)}`);
         }
@@ -1013,10 +1021,19 @@ export class TelegramClient implements Client {
 
   private toInlineKeyboard(buttons: Button[][]): Array<Array<{ text: string; callback_data: string }>> {
     return buttons.map((row) =>
-      row.map((btn) => ({
-        text: btn.text,
-        callback_data: btn.data,
-      })),
+      row.map((btn) => {
+        const byteLen = Buffer.byteLength(btn.data, 'utf8');
+        if (byteLen > TELEGRAM_CALLBACK_DATA_MAX_BYTES) {
+          const kind = btn.data.split(':')[0] ?? btn.data.slice(0, 16);
+          log.warn(
+            '[Telegram] callback_data exceeds 64-byte limit',
+            `bytes=${byteLen}`,
+            `kind=${JSON.stringify(kind)}`,
+            `text=${JSON.stringify(btn.text.slice(0, 32))}`,
+          );
+        }
+        return { text: btn.text, callback_data: btn.data };
+      }),
     );
   }
 }
