@@ -25,12 +25,30 @@ const DRAFT_ID_MAX = 2_147_483_647;
 const DRAFT_REQUEST_TIMEOUT_MS = 1200;
 let nextDraftId = 0;
 
-/** Abort a promise after `ms` using AbortController. Throws AbortError on timeout. */
-async function withAbortTimeout<T>(fn: (signal?: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+/**
+ * Race a promise against a wall-clock timer. On timeout, rejects with an
+ * AbortError-named Error and aborts the signal so the underlying call can
+ * release fetch/transformer resources. The inner promise may still settle
+ * later — its result will be ignored.
+ *
+ * Rejection ordering matters: we reject the timeout promise BEFORE aborting,
+ * because some transformers (e.g. `@grammyjs/auto-retry` during a backoff
+ * sleep) synchronously throw a plain `Error` when the signal aborts mid-wait,
+ * which would lose the AbortError name that callers detect via `e.name`.
+ */
+export async function withAbortTimeout<T>(fn: (signal?: AbortSignal) => Promise<T>, ms: number): Promise<T> {
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), ms);
+  let timer: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(`Operation timed out after ${ms}ms`);
+      err.name = 'AbortError';
+      reject(err);
+      ac.abort();
+    }, ms);
+  });
   try {
-    return await fn(ac.signal);
+    return await Promise.race([fn(ac.signal), timeoutPromise]);
   } finally {
     clearTimeout(timer);
   }
@@ -43,6 +61,17 @@ async function withAbortTimeout<T>(fn: (signal?: AbortSignal) => Promise<T>, ms:
  * request silently hangs (observed once per ~1,500 sends in production).
  */
 const DEFAULT_API_TIMEOUT_MS = 30_000;
+
+/**
+ * Timeout for fire-and-forget UX calls (reactions, typing indicators). These
+ * are silent-failure-safe — dropping the 👀 reaction or a typing-dot frame
+ * costs nothing visible, while letting them block forever can starve the
+ * per-chat Bottleneck lane and delay user-visible sends (see the 2026-06-03
+ * incident where a hung `setMessageReaction` blocked the placeholder
+ * `sendMessage` for 132s). 10s = ~10× normal Telegram latency, generous
+ * enough that slow but healthy networks don't drop these signals.
+ */
+const UX_CALL_TIMEOUT_MS = 10_000;
 
 /**
  * Race a promise against a setTimeout. On timeout we abandon the awaited
@@ -752,16 +781,39 @@ export class TelegramClient implements Client {
   // ── Presence ──
 
   async sendTyping(chatId: string, threadId?: number): Promise<void> {
-    await this.bot.api.sendChatAction(chatId, 'typing', { message_thread_id: threadId }).catch(() => {});
+    await withAbortTimeout(
+      (signal) =>
+        this.raw['sendChatAction'](
+          { chat_id: chatId, action: 'typing', message_thread_id: threadId } as Parameters<typeof this.raw['sendChatAction']>[0],
+          signal,
+        ) as Promise<unknown>,
+      UX_CALL_TIMEOUT_MS,
+    );
   }
 
   async setReaction(chatId: string, messageId: number, emoji: string): Promise<void> {
     const safe = toTelegramReaction(emoji);
-    await this.bot.api.setMessageReaction(chatId, messageId, [{ type: 'emoji', emoji: safe as never }]).catch(() => {});
+    await withAbortTimeout(
+      (signal) =>
+        this.raw['setMessageReaction'](
+          { chat_id: chatId, message_id: messageId, reaction: [{ type: 'emoji', emoji: safe as never }] } as Parameters<
+            typeof this.raw['setMessageReaction']
+          >[0],
+          signal,
+        ) as Promise<unknown>,
+      UX_CALL_TIMEOUT_MS,
+    );
   }
 
   async removeReaction(chatId: string, messageId: number): Promise<void> {
-    await this.bot.api.setMessageReaction(chatId, messageId, []).catch(() => {});
+    await withAbortTimeout(
+      (signal) =>
+        this.raw['setMessageReaction'](
+          { chat_id: chatId, message_id: messageId, reaction: [] } as Parameters<typeof this.raw['setMessageReaction']>[0],
+          signal,
+        ) as Promise<unknown>,
+      UX_CALL_TIMEOUT_MS,
+    );
   }
 
   // ── File operations ──

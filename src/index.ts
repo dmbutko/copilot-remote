@@ -522,11 +522,7 @@ async function main(): Promise<void> {
     });
 
     session.on('react_to', async (info: { messageId: number; emoji: string }) => {
-      try {
-        client.setReaction(chatId, info.messageId, info.emoji);
-      } catch {
-        /* ignore */
-      }
+      client.setReaction(chatId, info.messageId, info.emoji).catch(() => {});
     });
 
     toolHandler<{ phone: string; firstName: string; lastName?: string }>('contact', async (info) => {
@@ -2144,7 +2140,7 @@ async function main(): Promise<void> {
         }
         try {
           client.setReaction(chatId, msgId, '👍').catch(() => {});
-          client.sendTyping(chatId);
+          client.sendTyping(chatId).catch(() => {});
           const r = await s.compact();
           const info = contextInfoMap.get(chatId);
           const pct = info ? ' (' + Math.round((info.currentTokens / info.tokenLimit) * 100) + '% used)' : '';

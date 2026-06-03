@@ -2,7 +2,7 @@ import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Bot } from 'grammy';
 import type { Update, UserFromGetMe } from 'grammy/types';
-import { TelegramClient } from '../telegram.js';
+import { TelegramClient, withAbortTimeout } from '../telegram.js';
 
 const TEST_BOT_INFO: UserFromGetMe = {
   id: 999999,
@@ -691,5 +691,45 @@ describe('TelegramClient.checkInlineMode partial failure', () => {
       dmAttempts.map((c) => String(c.payload.chat_id)).sort(),
       ['111', '222'],
     );
+  });
+});
+
+describe('withAbortTimeout', () => {
+  it('resolves with inner value when fn completes before timeout', async () => {
+    const result = await withAbortTimeout(async () => 'ok', 1000);
+    assert.equal(result, 'ok');
+  });
+
+  it('rejects with AbortError when fn never resolves and timeout elapses', async () => {
+    const started = Date.now();
+    await assert.rejects(
+      withAbortTimeout(() => new Promise(() => {}), 50),
+      (e) => (e as Error)?.name === 'AbortError',
+    );
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed >= 40 && elapsed < 500, `expected ~50ms, got ${elapsed}ms`);
+  });
+
+  it('aborts the signal when timeout fires', async () => {
+    let observedSignal: AbortSignal | undefined;
+    await assert.rejects(
+      withAbortTimeout((signal) => {
+        observedSignal = signal;
+        return new Promise(() => {});
+      }, 50),
+      (e) => (e as Error)?.name === 'AbortError',
+    );
+    assert.equal(observedSignal?.aborted, true);
+  });
+
+  it('passes signal through to fn even on fast path', async () => {
+    let observedSignal: AbortSignal | undefined;
+    const result = await withAbortTimeout(async (signal) => {
+      observedSignal = signal;
+      return 42;
+    }, 1000);
+    assert.equal(result, 42);
+    assert.ok(observedSignal instanceof AbortSignal);
+    assert.equal(observedSignal.aborted, false);
   });
 });
