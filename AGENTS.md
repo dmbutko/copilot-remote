@@ -61,6 +61,65 @@
   file-intake tests. Looking at the transport alone is how the
   May-27 `/config` regression shipped (commit `3ea8cc1` → fix
   `2970645`).
+- **SDK RPC pattern (1.0+):** `session.rpc.X.Y()` and `client.rpc.X.Y()`
+  are typed public getters. Don't wrap in `as unknown as { rpc: ... }`
+  casts — that pattern is dead. For wrapper method return types, use
+  `ReturnType<SDKSession['rpc']['X']['Y']>` (NOT deep imports from
+  `dist/generated/`). Required because `tsconfig.declaration: true`
+  enforces portable inferred types.
+- **`handleEvent` narrowing (1.0+):** `src/session.ts` `handleEvent`
+  narrows on the SDK's discriminated `SessionEvent` union. Don't
+  reintroduce a `SessionEventData` index-signature wrapper around
+  `e.data` — it hides field-name mismatches. Cost us partial-output
+  (read non-existent `result/content/text` instead of `partialOutput`)
+  and image-block (read `result.content` string as if it were an
+  array; real image blocks are under `result.contents`) bugs once
+  already, plus a `success` field misread that rendered failed tools
+  as ✓. Add a case per `e.type`; let TS narrow.
+- **`toolNameByCallId` map**: events
+  `tool.execution_partial_result` and `tool.execution_complete`
+  don't carry `toolName` in SDK 1.0. Bridge maintains a per-Session
+  `Map<string,string>` keyed by `toolCallId`, populated in
+  `tool.execution_start`, drained in `tool.execution_complete`, and
+  **cleared on lifecycle methods** (`disconnect`, `kill`, `newSession`)
+  to avoid leaks across resumes/aborts.
+- **MCP `tools: []` flipped in SDK 1.0**: was "all tools" (v0), now
+  "no tools". Bridge defaults missing `tools` to `['*']` in
+  `coerceServerConfig` (`src/mcp-config.ts:98`), so bridge itself never
+  emits `[]`. But a user config with explicit `tools: []` will silently
+  lose all tools under 1.0. If you see "no tools" complaints, check
+  the user's `mcp-config.json` / `.vscode/mcp.json` first.
+
+## Validation gates (don't skip)
+
+- `npm run typecheck` (`tsc --noEmit`) is the real type gate.
+  `npm test` is `tsx --test` — **transpile-only, no type checking**.
+  We almost shipped type-broken code mid-SDK-1.0-migration because
+  of this. Always typecheck before `npm run build` (which IS deploy).
+- `npm run build` IS the deploy (debounced ~70s → SIGUSR1 → systemd
+  respawn). Never run without explicit user permission.
+
+## Known SDK 1.0 bugs to watch
+
+- **[#1562](https://github.com/github/copilot-sdk/issues/1562)** —
+  Copilot Memory facts are NOT injected into the system message on
+  `session.create`; only injected on `session.resume`. **For this
+  bridge that means**: every code path that hits `createSession`
+  starts Memory-less for the lifetime of that session (until next
+  bridge restart causes a resume). Triggers: first-ever message in
+  a chat/topic (no prior `sessionStore` entry); after `/new` or
+  `/start <dir>` (archives + creates fresh); after 3 consecutive
+  resume failures → automatic archive → next message creates fresh.
+  Pending upstream fix. Workaround: rebuild to force resume.
+- **`AbortEvent` unhandled** in `handleEvent` switch
+  (`src/session.ts`). SDK emits it on turn-abort but bridge has no
+  case. The `toolNameByCallId` map is already covered by lifecycle
+  clears (`disconnect`, `kill`, `newSession`), so this is purely
+  "could add the case for completeness." Low priority.
+- **`toolName: 'unknown'` fallback** in `tool_complete` triggers if
+  SDK ever emits `tool.execution_complete` before the matching
+  `tool.execution_start` (race). SDK contract says this shouldn't
+  happen.
 
 ## Logs (two sources — both useful)
 
