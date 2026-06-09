@@ -521,7 +521,7 @@ describe('Session', () => {
     });
 
     assert.deepEqual(clientOpts, {
-      cliUrl: 'http://127.0.0.1:4141',
+      connection: { kind: 'uri', url: 'http://127.0.0.1:4141', connectionToken: undefined },
     });
   });
 
@@ -537,9 +537,8 @@ describe('Session', () => {
     });
 
     assert.deepEqual(clientOpts, {
-      useStdio: true,
+      connection: { kind: 'stdio', path: 'copilot', args: undefined },
       useLoggedInUser: false,
-      cliPath: 'copilot',
     });
   });
 

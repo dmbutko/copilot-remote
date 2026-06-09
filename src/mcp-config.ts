@@ -107,13 +107,16 @@ function coerceServerConfig(raw: Record<string, unknown>): MCPServerConfig {
     } as MCPRemoteServerConfig;
   }
 
+  // Accept both `cwd` (legacy user config) and `workingDirectory` (SDK v1 shape)
+  const workingDirectory = (raw.workingDirectory as string | undefined) ?? (raw.cwd as string | undefined);
+
   return {
     ...(type !== 'local' ? { type: type as 'local' | 'stdio' } : {}),
     command: raw.command as string,
     args: (raw.args as string[]) ?? [],
     tools,
     ...(raw.env ? { env: raw.env as Record<string, string> } : {}),
-    ...(raw.cwd ? { cwd: raw.cwd as string } : {}),
+    ...(workingDirectory ? { workingDirectory } : {}),
     ...(raw.timeout ? { timeout: raw.timeout as number } : {}),
   } as MCPLocalServerConfig;
 }
@@ -229,11 +232,11 @@ export function loadMcpServers(
   for (const [name, cfg] of Object.entries(envExpanded)) {
     try {
       const coerced = coerceServerConfig(cfg);
-      // Set cwd to workDir for local servers that don't have one
+      // Set workingDirectory to workDir for local servers that don't have one
       // so relative command/arg paths resolve correctly
       if (workDir && coerced.type !== 'http' && coerced.type !== 'sse') {
         const local = coerced as MCPLocalServerConfig;
-        if (!local.cwd) local.cwd = workDir;
+        if (!local.workingDirectory) local.workingDirectory = workDir;
       }
       merged[name] = coerced;
     } catch (e) {
@@ -267,13 +270,14 @@ export function formatServerConfigDetails(cfg: MCPServerConfig): string {
   const isRemote = cfg.type === 'http' || cfg.type === 'sse';
   const detail = isRemote
     ? (cfg as MCPRemoteServerConfig).url
-    : `${(cfg as MCPLocalServerConfig).command} ${(cfg as MCPLocalServerConfig).args.join(' ')}`;
+    : `${(cfg as MCPLocalServerConfig).command} ${((cfg as MCPLocalServerConfig).args ?? []).join(' ')}`;
+  const tools = cfg.tools ?? [];
   const toolsStr =
-    cfg.tools.length === 1 && cfg.tools[0] === '*'
+    tools.length === 1 && tools[0] === '*'
       ? 'all tools'
-      : cfg.tools.length === 0
+      : tools.length === 0
         ? 'no tools'
-        : cfg.tools.join(', ');
+        : tools.join(', ');
   return `${detail}\n   _Tools: ${toolsStr}_`;
 }
 

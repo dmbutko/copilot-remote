@@ -201,14 +201,14 @@ describe('mcp-config', () => {
       assert.equal(cfg.command, 'python');
     });
 
-    it('preserves timeout and cwd', () => {
+    it('preserves timeout and workingDirectory', () => {
       const cfgServers = {
         full: { command: 'node', args: ['s.js'], tools: ['*'], timeout: 30000, cwd: '/tmp' },
       };
       const { merged } = loadMcpServers(cfgServers, tmpDir);
       const cfg = merged.full as MCPLocalServerConfig;
       assert.equal(cfg.timeout, 30000);
-      assert.equal(cfg.cwd, '/tmp');
+      assert.equal(cfg.workingDirectory, '/tmp');
     });
   });
 
@@ -294,7 +294,7 @@ describe('mcp-config', () => {
       };
       const { merged } = loadMcpServers(cfgServers, '/home/user/myproject');
       const cfg = merged.local as MCPLocalServerConfig;
-      assert.equal(cfg.args[0], '/home/user/myproject/tools/server.py');
+      assert.equal(cfg.args?.[0], '/home/user/myproject/tools/server.py');
     });
 
     it('expands ${workspaceFolder} in envFile paths', () => {

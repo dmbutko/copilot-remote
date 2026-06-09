@@ -2,6 +2,7 @@
 import {
   CopilotClient,
   CopilotSession as SDKSession,
+  RuntimeConnection,
   approveAll,
   type SessionEvent,
   type ModelInfo,
@@ -218,15 +219,16 @@ export class Session extends EventEmitter {
     githubToken?: string;
     provider?: RemoteProviderConfig;
   }): CopilotClientOptions {
+    // forUri is mutually exclusive with gitHubToken/useLoggedInUser (external server
+    // manages its own auth). Keep this branch first to avoid pairing them.
     if (opts?.cliUrl) {
-      return { cliUrl: opts.cliUrl };
+      return { connection: RuntimeConnection.forUri(opts.cliUrl) };
     }
 
     const clientOpts: CopilotClientOptions = {
-      useStdio: true,
+      connection: RuntimeConnection.forStdio(opts?.binary ? { path: opts.binary } : undefined),
       ...(opts?.provider ? { useLoggedInUser: false } : {}),
     };
-    if (opts?.binary) clientOpts.cliPath = opts.binary;
     if (opts?.githubToken && !opts.provider) clientOpts.gitHubToken = opts.githubToken;
     return clientOpts;
   }
@@ -994,7 +996,7 @@ export class Session extends EventEmitter {
     ).rpc.account.getQuota();
   }
   async getMessages(): Promise<SessionMessage[]> {
-    return (this.session?.getMessages() ?? []) as SessionMessage[];
+    return (this.session?.getEvents() ?? []) as SessionMessage[];
   }
   async listFiles(): Promise<string[]> {
     return ((await this.session!.rpc.workspaces.listFiles()) as { files?: string[] })?.files ?? [];
