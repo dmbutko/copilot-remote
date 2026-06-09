@@ -885,7 +885,7 @@ export class Session extends EventEmitter {
    * List MCP servers attached to the current session, with their status.
    * This is the right RPC for inventory — `listTools()` does NOT include MCP tools.
    */
-  async listMcpServers(): Promise<Awaited<ReturnType<SDKSession['rpc']['mcp']['list']>> | { servers: [] }> {
+  async listMcpServers(): ReturnType<SDKSession['rpc']['mcp']['list']> {
     if (!this.session) return { servers: [] };
     return this.session.rpc.mcp.list();
   }
@@ -904,6 +904,7 @@ export class Session extends EventEmitter {
 
   async newSession(opts?: Partial<SessionOptions>): Promise<void> {
     if (this.session) await this.session.disconnect();
+    this.toolNameByCallId.clear();
     const config = this.buildConfig({
       cwd: this.cwd,
       autopilot: this._autopilot,
@@ -921,6 +922,7 @@ export class Session extends EventEmitter {
     this._turnActive = false;
     this.activeTurnId = null;
     this.clearPendingTurnReservations('Session disconnected');
+    this.toolNameByCallId.clear();
     try {
       await this.session?.disconnect();
     } catch {
@@ -969,6 +971,7 @@ export class Session extends EventEmitter {
     this._turnActive = false;
     this.activeTurnId = null;
     this.clearPendingTurnReservations('Session killed');
+    this.toolNameByCallId.clear();
     try {
       await this.session?.disconnect();
     } catch {
