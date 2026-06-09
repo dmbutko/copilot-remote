@@ -17,7 +17,6 @@
     "!dist/test-cli.d.ts",
     "!dist/test-cli.js",
     "install.sh",
-    "scripts/patch-copilot-sdk.mjs",
     "README.md",
     "LICENSE"
   ],
@@ -27,7 +26,6 @@
     "package:check": "npm run build && npm pack --dry-run",
     "publish:dry-run": "npm publish --dry-run",
     "release:npm": "npm publish",
-    "postinstall": "node scripts/patch-copilot-sdk.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/ && prettier --check 'src/**/*.ts'",
     "lint:fix": "eslint src/ --fix && prettier --write 'src/**/*.ts'",

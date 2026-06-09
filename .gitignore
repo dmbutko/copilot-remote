@@ -8,3 +8,7 @@ dist/
 *.log
 .bot.pid
 config.json
+chat-sessions.json
+work-dirs.json
+copilot-remote.lock/
+copilot-remote.doc

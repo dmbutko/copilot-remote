@@ -320,7 +320,8 @@ export async function handleConfigCallback(
         const q = await s.getQuota();
         const snaps = q?.quotaSnapshots;
         if (snaps && typeof snaps === 'object') {
-          for (const [name, snap] of Object.entries(snaps) as unknown as [string, Record<string, unknown>][]) {
+          for (const [name, snap] of Object.entries(snaps)) {
+            if (!snap) continue;
             const used = snap.usedRequests ?? 0;
             const total = snap.entitlementRequests ?? 0;
             const pct = snap.remainingPercentage ?? 100;

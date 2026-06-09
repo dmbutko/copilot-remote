@@ -31,95 +31,6 @@ interface UserInputRequest {
   choices?: string[];
 }
 
-/** Event data from SDK session events */
-interface SessionEventData {
-  content?: string;
-  text?: string;
-  name?: string;
-  toolName?: string;
-  arguments?: unknown;
-  exitCode?: number;
-  success?: boolean;
-  message?: string;
-  [key: string]: unknown;
-}
-
-/** Quota snapshot from the account API */
-export interface QuotaSnapshot {
-  usedRequests: number;
-  entitlementRequests: number;
-  remainingPercentage: number;
-}
-
-/** Quota response from the account API */
-export interface QuotaResponse {
-  quotaSnapshots?: QuotaSnapshot[];
-}
-
-/** Agent info from the agent API */
-export interface AgentInfo {
-  name: string;
-  [key: string]: unknown;
-}
-
-/** Agent list response */
-export interface AgentListResponse {
-  agents?: AgentInfo[];
-}
-
-/** Current agent response */
-export interface CurrentAgentResponse {
-  agent?: AgentInfo;
-}
-
-/** Current model response */
-export interface CurrentModelResponse {
-  modelId?: string;
-}
-
-/** Compact response */
-export interface CompactResponse {
-  tokensFreed?: number;
-}
-
-/** Plan response */
-export interface PlanResponse {
-  content?: string;
-}
-
-/** Tool info from the tools API */
-export interface ToolInfo {
-  name: string;
-  namespacedName?: string;
-  description?: string;
-  [key: string]: unknown;
-}
-
-/** Tools list response */
-export interface ToolsListResponse {
-  tools?: ToolInfo[];
-}
-
-/** MCP server summary returned by session.mcp.list */
-export interface McpServerSummary {
-  name: string;
-  status: 'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled' | 'not_configured';
-  source?: 'user' | 'workspace' | 'plugin' | 'builtin';
-  error?: string;
-}
-
-/** Response from session.mcp.list */
-export interface McpListResponse {
-  servers: McpServerSummary[];
-}
-
-/** Session message */
-export interface SessionMessage {
-  type: string;
-  content?: string;
-  [key: string]: unknown;
-}
-
 export interface SessionOptions {
   cwd: string;
   sessionId?: string;
@@ -362,6 +273,7 @@ export class Session extends EventEmitter {
   private sendChain: Promise<void> = Promise.resolve();
   private sdkEventSeq = 0;
   private lastSdkEventAt: number | null = null;
+  private toolNameByCallId = new Map<string, string>();
 
   get alive() {
     return this._alive;
@@ -607,52 +519,45 @@ export class Session extends EventEmitter {
       ...formatLogFields({ seq: this.sdkEventSeq, sinceLastEventMs, ...summarizeSdkEvent(e.type, eventData) }),
     );
     log.debug(`[SDK event] ${e.type}:`, JSON.stringify(e.data ?? {}));
-    const d = e.data as SessionEventData;
-    const text = String(d.deltaContent ?? d.content ?? d.text ?? '');
-    const turnId = typeof d.turnId === 'string' ? d.turnId : null;
     switch (e.type) {
       case 'assistant.message_delta': {
+        const text = e.data.deltaContent;
         this.emit('delta', text);
-        this.emit('delta_event', { turnId: this.activeTurnId, text } as SessionStreamEvent);
+        this.emit('delta_event', { turnId: this.activeTurnId, text } satisfies SessionStreamEvent);
         break;
       }
       case 'assistant.reasoning_delta': {
+        const text = e.data.deltaContent;
         this.emit('thinking', text);
-        this.emit('thinking_event', { turnId: this.activeTurnId, text } as SessionStreamEvent);
+        this.emit('thinking_event', { turnId: this.activeTurnId, text } satisfies SessionStreamEvent);
         break;
       }
-      case 'assistant.reasoning':
+      case 'assistant.reasoning': {
+        const text = e.data.content;
         if (text) {
-          this.emit('thinking_summary', { turnId: this.activeTurnId, text } as SessionStreamEvent);
+          this.emit('thinking_summary', { turnId: this.activeTurnId, text } satisfies SessionStreamEvent);
         }
         break;
+      }
       case 'assistant.message': {
-        const content = typeof d.content === 'string' ? d.content : '';
-        const reasoningText = typeof d.reasoningText === 'string' ? d.reasoningText : undefined;
-        const rawToolRequests = Array.isArray((e.data as { toolRequests?: unknown }).toolRequests)
-          ? (e.data as { toolRequests: unknown[] }).toolRequests
-          : [];
-        const toolRequests = rawToolRequests.flatMap((toolRequest) => {
-          if (!toolRequest || typeof toolRequest !== 'object') return [];
-          const request = toolRequest as Record<string, unknown>;
-          const name = typeof request.name === 'string' ? request.name : undefined;
-          if (!name) return [];
+        const content = e.data.content;
+        const reasoningText = e.data.reasoningText;
+        const rawToolRequests = e.data.toolRequests ?? [];
+        const toolRequests = rawToolRequests.flatMap<AssistantPlanToolRequest>((req) => {
+          if (!req?.name) return [];
           return [
             {
-              toolCallId: typeof request.toolCallId === 'string' ? request.toolCallId : undefined,
-              name,
-              arguments:
-                request.arguments && typeof request.arguments === 'object'
-                  ? (request.arguments as Record<string, unknown>)
-                  : undefined,
-              type: typeof request.type === 'string' ? request.type : undefined,
-            } satisfies AssistantPlanToolRequest,
+              toolCallId: req.toolCallId,
+              name: req.name,
+              arguments: req.arguments,
+              type: req.type,
+            },
           ];
         });
 
         this.emit('message', content);
         if (reasoningText) {
-          this.emit('thinking_summary', { turnId: this.activeTurnId, text: reasoningText } as SessionStreamEvent);
+          this.emit('thinking_summary', { turnId: this.activeTurnId, text: reasoningText } satisfies SessionStreamEvent);
         }
         if (content || reasoningText || toolRequests.length) {
           this.emit('assistant_plan', {
@@ -665,61 +570,60 @@ export class Session extends EventEmitter {
         break;
       }
       case 'assistant.usage':
-        this.emit('usage', d);
+        this.emit('usage', e.data);
         break;
       case 'assistant.turn_start':
         this._turnActive = true;
-        this.activeTurnId = turnId;
-        if (turnId) {
-          this.claimActiveReservationTurn(turnId);
-        }
-        this.emit('turn_start', { turnId, interactionId: d.interactionId });
+        this.activeTurnId = e.data.turnId;
+        this.claimActiveReservationTurn(e.data.turnId);
+        this.emit('turn_start', { turnId: e.data.turnId, interactionId: e.data.interactionId });
         break;
       case 'assistant.turn_end':
         this._turnActive = false;
-        if (this.activeTurnId === turnId) this.activeTurnId = null;
-        this.emit('turn_end', { turnId });
+        if (this.activeTurnId === e.data.turnId) this.activeTurnId = null;
+        this.emit('turn_end', { turnId: e.data.turnId });
         break;
       case 'session.usage_info':
         this.emit('context_info', {
-          tokenLimit: d.tokenLimit,
-          currentTokens: d.currentTokens,
-          messagesLength: d.messagesLength,
+          tokenLimit: e.data.tokenLimit,
+          currentTokens: e.data.currentTokens,
+          messagesLength: e.data.messagesLength,
         });
         break;
       case 'tool.execution_start':
+        this.toolNameByCallId.set(e.data.toolCallId, e.data.toolName);
         this.emit('tool_start', {
           turnId: this.activeTurnId,
-          toolCallId: d.toolCallId,
-          toolName: d.name ?? d.toolName,
-          arguments: d.arguments,
+          toolCallId: e.data.toolCallId,
+          toolName: e.data.toolName,
+          arguments: e.data.arguments as Record<string, string> | undefined,
         });
         break;
       case 'tool.execution_partial_result':
         this.emit('tool_output', {
           turnId: this.activeTurnId,
-          toolCallId: d.toolCallId,
-          toolName: d.name ?? d.toolName,
-          content: d.result ?? d.content ?? d.text ?? '',
+          toolCallId: e.data.toolCallId,
+          toolName: this.toolNameByCallId.get(e.data.toolCallId) ?? 'unknown',
+          content: e.data.partialOutput ?? '',
         });
         break;
       case 'tool.execution_complete': {
-        const result = d.result as any;
-        // Check for image content blocks in the result
+        const callId = e.data.toolCallId;
+        const toolName =
+          this.toolNameByCallId.get(callId) ?? e.data.toolDescription?.name ?? 'unknown';
+        this.toolNameByCallId.delete(callId);
+        // Image blocks live under `result.contents` (typed content block array).
+        // The string `result.content` summary stays as detailedContent fallback.
         const imageBlocks: string[] = [];
-        if (result?.content && Array.isArray(result.content)) {
-          for (const block of result.content) {
-            if (block.type === 'image' && block.data) {
-              imageBlocks.push(block.data); // base64 string
-            }
-          }
+        for (const block of e.data.result?.contents ?? []) {
+          if (block.type === 'image' && block.data) imageBlocks.push(block.data);
         }
         this.emit('tool_complete', {
           turnId: this.activeTurnId,
-          toolCallId: d.toolCallId,
-          toolName: d.name ?? d.toolName,
-          success: d.exitCode === 0 || d.success !== false,
-          detailedContent: (d.result as any)?.detailedContent ?? (d.result as any)?.content,
+          toolCallId: callId,
+          toolName,
+          success: e.data.success,
+          detailedContent: e.data.result?.detailedContent ?? e.data.result?.content,
           images: imageBlocks.length ? imageBlocks : undefined,
         });
         break;
@@ -727,10 +631,10 @@ export class Session extends EventEmitter {
       case 'subagent.started':
         this.emit('subagent_start', {
           turnId: this.activeTurnId,
-          toolCallId: typeof d.toolCallId === 'string' ? d.toolCallId : undefined,
-          agentName: typeof d.agentName === 'string' ? d.agentName : undefined,
-          agentDisplayName: typeof d.agentDisplayName === 'string' ? d.agentDisplayName : undefined,
-          agentDescription: typeof d.agentDescription === 'string' ? d.agentDescription : undefined,
+          toolCallId: e.data.toolCallId,
+          agentName: e.data.agentName,
+          agentDisplayName: e.data.agentDisplayName,
+          agentDescription: e.data.agentDescription,
         } satisfies SubagentStartEvent);
         break;
       case 'permission.requested':
@@ -738,14 +642,14 @@ export class Session extends EventEmitter {
         // and waits for the response. Emitting from both causes duplicate prompts.
         break;
       case 'session.idle':
-        log.info('[SDK idle]', JSON.stringify(d));
+        log.info('[SDK idle]', JSON.stringify(e.data));
         this.emit('idle');
         break;
       case 'session.title_changed':
-        this.emit('title_changed', { title: d.title ?? d.summary ?? '' });
+        this.emit('title_changed', { title: e.data.title });
         break;
       case 'session.error':
-        this.emit('error', d.message ?? 'Unknown error');
+        this.emit('error', e.data.message ?? 'Unknown error');
         break;
     }
   }
@@ -944,65 +848,58 @@ export class Session extends EventEmitter {
   async setMode(mode: string) {
     await this.session!.rpc.mode.set({ mode: mode as 'interactive' | 'plan' | 'autopilot' });
   }
-  async getMode(): Promise<string> {
+  async getMode(): Promise<ReturnType<SDKSession['rpc']['mode']['get']>> {
     return await this.session!.rpc.mode.get();
   }
-  async compact(): Promise<CompactResponse> {
-    return this.session!.rpc.history.compact() as Promise<CompactResponse>;
+  async compact(): ReturnType<SDKSession['rpc']['history']['compact']> {
+    return this.session!.rpc.history.compact();
   }
-  async startFleet(prompt?: string): Promise<unknown> {
+  async startFleet(prompt?: string): ReturnType<SDKSession['rpc']['fleet']['start']> {
     return this.session!.rpc.fleet.start({ prompt });
   }
-  async listAgents(): Promise<AgentListResponse> {
-    return this.session!.rpc.agent.list() as unknown as Promise<AgentListResponse>;
+  async listAgents(): ReturnType<SDKSession['rpc']['agent']['list']> {
+    return this.session!.rpc.agent.list();
   }
-  async selectAgent(name: string): Promise<unknown> {
+  async selectAgent(name: string): ReturnType<SDKSession['rpc']['agent']['select']> {
     return this.session!.rpc.agent.select({ name });
   }
-  async deselectAgent(): Promise<unknown> {
+  async deselectAgent(): ReturnType<SDKSession['rpc']['agent']['deselect']> {
     return this.session!.rpc.agent.deselect();
   }
-  async getCurrentModel(): Promise<CurrentModelResponse> {
-    return this.session!.rpc.model.getCurrent() as Promise<CurrentModelResponse>;
+  async getCurrentModel(): ReturnType<SDKSession['rpc']['model']['getCurrent']> {
+    return this.session!.rpc.model.getCurrent();
   }
-  async getCurrentAgent(): Promise<CurrentAgentResponse> {
-    return this.session!.rpc.agent.getCurrent() as Promise<CurrentAgentResponse>;
+  async getCurrentAgent(): ReturnType<SDKSession['rpc']['agent']['getCurrent']> {
+    return this.session!.rpc.agent.getCurrent();
   }
-  async readPlan(): Promise<PlanResponse> {
-    return this.session!.rpc.plan.read() as Promise<PlanResponse>;
+  async readPlan(): ReturnType<SDKSession['rpc']['plan']['read']> {
+    return this.session!.rpc.plan.read();
   }
-  async deletePlan(): Promise<unknown> {
+  async deletePlan(): ReturnType<SDKSession['rpc']['plan']['delete']> {
     return this.session!.rpc.plan.delete();
   }
-  async listTools(): Promise<ToolsListResponse> {
-    return (
-      this.client as unknown as {
-        rpc: { tools: { list: (opts: { sessionId: string }) => Promise<ToolsListResponse> } };
-      }
-    ).rpc.tools.list({ sessionId: this.session!.sessionId! });
+  async listTools(): ReturnType<CopilotClient['rpc']['tools']['list']> {
+    return this.client!.rpc.tools.list({});
   }
   /**
    * List MCP servers attached to the current session, with their status.
    * This is the right RPC for inventory — `listTools()` does NOT include MCP tools.
    */
-  async listMcpServers(): Promise<McpListResponse> {
+  async listMcpServers(): Promise<Awaited<ReturnType<SDKSession['rpc']['mcp']['list']>> | { servers: [] }> {
     if (!this.session) return { servers: [] };
-    const rpc = (this.session as unknown as { rpc: { mcp: { list: () => Promise<McpListResponse> } } }).rpc;
-    return rpc.mcp.list();
+    return this.session.rpc.mcp.list();
   }
-  async getQuota(): Promise<QuotaResponse> {
-    return (
-      this.client as unknown as { rpc: { account: { getQuota: () => Promise<QuotaResponse> } } }
-    ).rpc.account.getQuota();
+  async getQuota(): ReturnType<CopilotClient['rpc']['account']['getQuota']> {
+    return this.client!.rpc.account.getQuota({});
   }
-  async getMessages(): Promise<SessionMessage[]> {
-    return (this.session?.getEvents() ?? []) as SessionMessage[];
+  async getMessages(): Promise<SessionEvent[]> {
+    return this.session?.getEvents() ?? [];
   }
   async listFiles(): Promise<string[]> {
-    return ((await this.session!.rpc.workspaces.listFiles()) as { files?: string[] })?.files ?? [];
+    return (await this.session!.rpc.workspaces.listFiles()).files ?? [];
   }
   async readFile(path: string): Promise<string> {
-    return ((await this.session!.rpc.workspaces.readFile({ path })) as { content?: string })?.content ?? '';
+    return (await this.session!.rpc.workspaces.readFile({ path })).content ?? '';
   }
 
   async newSession(opts?: Partial<SessionOptions>): Promise<void> {

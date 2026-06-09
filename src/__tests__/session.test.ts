@@ -348,18 +348,24 @@ describe('Session', () => {
       toolEvent = event as Record<string, unknown>;
     });
 
+    // Register the tool name via execution_start so execution_complete can look it up
+    session.handleEvent({
+      type: 'tool.execution_start',
+      data: { toolCallId: 'call-1', toolName: 'generate_image', arguments: {} },
+    } as any);
+
     session.handleEvent({
       type: 'tool.execution_complete',
       data: {
         toolCallId: 'call-1',
-        name: 'generate_image',
-        exitCode: 0,
+        success: true,
         result: {
+          content: 'done',
           detailedContent: 'done',
-          content: [
-            { type: 'image', data: 'base64-image-1' },
+          contents: [
+            { type: 'image', data: 'base64-image-1', mimeType: 'image/png' },
             { type: 'text', text: 'ignored' },
-            { type: 'image', data: 'base64-image-2' },
+            { type: 'image', data: 'base64-image-2', mimeType: 'image/png' },
           ],
         },
       },
@@ -372,6 +378,32 @@ describe('Session', () => {
       success: true,
       detailedContent: 'done',
       images: ['base64-image-1', 'base64-image-2'],
+    });
+  });
+
+  it('maps tool.execution_partial_result events to tool_output with toolName from start event', () => {
+    const session = new Session() as any;
+    let outputEvent: Record<string, unknown> | undefined;
+
+    session.on('tool_output', (event: unknown) => {
+      outputEvent = event as Record<string, unknown>;
+    });
+
+    session.handleEvent({
+      type: 'tool.execution_start',
+      data: { toolCallId: 'call-9', toolName: 'shell', arguments: {} },
+    } as any);
+
+    session.handleEvent({
+      type: 'tool.execution_partial_result',
+      data: { toolCallId: 'call-9', partialOutput: 'hello world' },
+    } as any);
+
+    assert.deepEqual(outputEvent, {
+      turnId: null,
+      toolCallId: 'call-9',
+      toolName: 'shell',
+      content: 'hello world',
     });
   });
 

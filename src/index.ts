@@ -1,7 +1,6 @@
 // Copilot Remote — Telegram ↔ Copilot SDK bridge
 import { Session } from './session.js';
 import type {
-  ToolInfo,
   FileAttachment,
   SessionStreamEvent,
   AssistantPlanEvent,
@@ -392,7 +391,7 @@ async function main(): Promise<void> {
 
   if (client.sendPhoto) {
     const origSendPhoto = client.sendPhoto.bind(client);
-    client.sendPhoto = (key: string, fileOrUrl: string, caption?: string) => {
+    client.sendPhoto = (key: string, fileOrUrl: string | Buffer, caption?: string) => {
       const [cid, tid] = resolveKey(key);
       return origSendPhoto(cid, fileOrUrl, caption, tid);
     };
@@ -1031,6 +1030,7 @@ async function main(): Promise<void> {
       if (targetIndex >= 0) {
         const baseLine = toolLines[targetIndex].split('\n')[0];
         toolLines[targetIndex] = baseLine + '\n```\n' + tail.join('\n') + '\n```';
+        void updateProgress();
       }
     };
     const onSubagentStart = (event: SubagentStartEvent) => {
@@ -1754,8 +1754,8 @@ async function main(): Promise<void> {
           const snap = q?.quotaSnapshots;
           log.debug('Quota snapshots:', JSON.stringify(snap));
           if (snap) {
-            const chat = (snap as any).chat;
-            const completions = (snap as any).completions;
+            const chat = snap.chat;
+            const completions = snap.completions;
             if (chat || completions) {
               lines.push('');
               lines.push('**Quota**');
@@ -1765,11 +1765,11 @@ async function main(): Promise<void> {
                 } else {
                   lines.push(
                     '💬 Chat: `' +
-                      (chat.usedRequests ?? chat.used ?? '?') +
+                      (chat.usedRequests ?? '?') +
                       '/' +
-                      (chat.entitlementRequests ?? chat.limit ?? '?') +
+                      (chat.entitlementRequests ?? '?') +
                       '` (' +
-                      (chat.remainingPercentage ?? chat.remaining_percentage ?? '?') +
+                      (chat.remainingPercentage ?? '?') +
                       '% left)',
                   );
                 }
@@ -1780,11 +1780,11 @@ async function main(): Promise<void> {
                 } else {
                   lines.push(
                     '⚡ Completions: `' +
-                      (completions.usedRequests ?? completions.used ?? '?') +
+                      (completions.usedRequests ?? '?') +
                       '/' +
-                      (completions.entitlementRequests ?? completions.limit ?? '?') +
+                      (completions.entitlementRequests ?? '?') +
                       '` (' +
-                      (completions.remainingPercentage ?? completions.remaining_percentage ?? '?') +
+                      (completions.remainingPercentage ?? '?') +
                       '% left)',
                   );
                 }
@@ -2145,7 +2145,7 @@ async function main(): Promise<void> {
           const info = contextInfoMap.get(chatId);
           const pct = info ? ' (' + Math.round((info.currentTokens / info.tokenLimit) * 100) + '% used)' : '';
           client.setReaction(chatId, msgId, '✅').catch(() => {});
-          await client.sendMessage(chatId, '🗜️ Compacted — ' + (r?.tokensFreed ?? 0) + ' tokens freed' + pct);
+          await client.sendMessage(chatId, '🗜️ Compacted — ' + (r?.tokensRemoved ?? 0) + ' tokens freed' + pct);
         } catch (e) {
           await client.sendMessage(chatId, '❌ ' + e);
         }
@@ -2179,7 +2179,8 @@ async function main(): Promise<void> {
           const snaps = q?.quotaSnapshots;
           const lines: string[] = [];
           if (snaps && typeof snaps === 'object') {
-            for (const [name, snap] of Object.entries(snaps) as [string, any][]) {
+            for (const [name, snap] of Object.entries(snaps)) {
+              if (!snap) continue;
               const used = snap.usedRequests ?? 0;
               const total = snap.entitlementRequests ?? 0;
               const pct = snap.remainingPercentage ?? 100;
@@ -2240,7 +2241,7 @@ async function main(): Promise<void> {
           const r = await s.listTools();
           const tools = r?.tools ?? [];
           if (tools.length) {
-            const lines = tools.slice(0, 30).map((t: ToolInfo) => '• `' + (t.name ?? t) + '`');
+            const lines = tools.slice(0, 30).map((t) => '• `' + (t.name ?? t) + '`');
             await client.sendMessage(chatId, '🔧 *Tools* (' + tools.length + ')\n' + lines.join('\n'));
           } else await client.sendMessage(chatId, '🔧 No tools.');
         } catch (e) {
