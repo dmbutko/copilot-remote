@@ -121,18 +121,6 @@ export class MockTelegramHarness implements Client {
     return this.nextDraftIdValue++;
   }
 
-  async createForumTopic(chatId: string, name: string): Promise<number> {
-    const threadId = this.allocateMessageId();
-    this.topicNames.set(`${chatId}:${threadId}`, name);
-    this.log('topic-create', threadId, `${chatId} -> ${name}`);
-    return threadId;
-  }
-
-  async deleteForumTopic(chatId: string, threadId: number): Promise<void> {
-    this.topicNames.delete(`${chatId}:${threadId}`);
-    this.log('topic-delete', threadId, chatId);
-  }
-
   async pinMessage(chatId: string, messageId: number): Promise<void> {
     this.log('pin', messageId, chatId);
   }

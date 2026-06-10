@@ -874,29 +874,7 @@ export class TelegramClient implements Client {
     }
   }
 
-  // ── Forum topics ──
-
-  async createForumTopic(chatId: string, name: string): Promise<number | null> {
-    try {
-      const res = await this.bot.api.createForumTopic(chatId, name);
-      return res.message_thread_id ?? null;
-    } catch (e: unknown) {
-      log.error('createForumTopic failed:', e instanceof Error ? e.message : e);
-      return null;
-    }
-  }
-
-  async editForumTopic(chatId: string, threadId: number, name: string): Promise<void> {
-    try {
-      await this.bot.api.editForumTopic(chatId, threadId, { name });
-    } catch {
-      /* best-effort */
-    }
-  }
-
-  async deleteForumTopic(chatId: string, threadId: number): Promise<void> {
-    await this.bot.api.deleteForumTopic(chatId, threadId).catch(() => {});
-  }
+  // ── Message actions ──
 
   async pinMessage(chatId: string, messageId: number): Promise<void> {
     await this.bot.api.pinChatMessage(chatId, messageId, { disable_notification: true }).catch(() => {});
