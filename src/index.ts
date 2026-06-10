@@ -555,16 +555,6 @@ async function main(): Promise<void> {
     });
     session.on('hook:session_start', () => log.debug('[hook] Session started for chat', chatId));
     session.on('hook:session_end', () => log.debug('[hook] Session ended for chat', chatId));
-    // Auto-rename forum topics when SDK provides a title
-    session.on('title_changed', ({ title }: { title: string }) => {
-      if (!title) return;
-      const [cid, tid] = resolveKey(chatId);
-      if (tid && 'editForumTopic' in client) {
-        (client as unknown as { editForumTopic: (c: string, t: number, n: string) => Promise<void> })
-          .editForumTopic(cid, tid, title)
-          .catch(() => {});
-      }
-    });
   }
 
   function buildSessionOptions(chatId: string, cwdOverride?: string, sessionIdOverride?: string) {
