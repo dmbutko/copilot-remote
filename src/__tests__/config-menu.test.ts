@@ -12,6 +12,8 @@ function createDeps(initialConfig?: Partial<ChatConfig>) {
     } satisfies ChatConfig,
     raw: {} as Record<string, unknown>,
     deletedSessionStoreKeys: [] as string[],
+    getSessionCalls: 0,
+    suspendCalls: 0,
   };
 
   const client = {
@@ -51,13 +53,16 @@ function createDeps(initialConfig?: Partial<ChatConfig>) {
       delete: (key: string) => state.deletedSessionStoreKeys.push(key),
       get: () => undefined,
     },
-    cachedModels: [],
-    setCachedModels: () => {},
     listModels: async () => [],
     workDir: () => '/tmp/project',
     bin: 'copilot',
-    getSession: async () => ({ alive: true }),
-    purgeSessionPersistence: async () => {},
+    getSession: async () => {
+      state.getSessionCalls++;
+      return { alive: true };
+    },
+    suspendSession: () => {
+      state.suspendCalls++;
+    },
   };
 
   return { state, deps };
@@ -105,5 +110,26 @@ describe('config-menu', () => {
       callbackId: 'cb-2',
       text: 'Thinking: ✅ ON',
     });
+  });
+
+  it('ignores an invalid ctx: callback without rebuilding or changing config', async () => {
+    const { state, deps } = createDeps({ contextTier: 'default' });
+
+    const handled = await handleConfigCallback('ctx:bogus', 'chat-1', 77, 'cb-ctx', deps as never);
+
+    assert.equal(handled, true);
+    assert.equal(state.config.contextTier, 'default');
+    assert.equal(state.getSessionCalls, 0);
+    assert.equal(state.suspendCalls, 0);
+  });
+
+  it('applies a valid ctx: callback', async () => {
+    const { state, deps } = createDeps({ contextTier: 'default' });
+
+    const handled = await handleConfigCallback('ctx:long_context', 'chat-1', 78, 'cb-ctx2', deps as never);
+
+    assert.equal(handled, true);
+    assert.equal(state.config.contextTier, 'long_context');
+    assert.equal(state.getSessionCalls, 1);
   });
 });

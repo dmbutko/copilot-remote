@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { ConfigStore, DEFAULT_CONFIG, normalizeMessageMode } from '../config-store.js';
+import { ConfigStore, DEFAULT_CONFIG, normalizeMessageMode, normalizeContextTier } from '../config-store.js';
 
 describe('ConfigStore', () => {
   // Tests use a per-suite tmpdir for config so they don't mutate the real
@@ -47,6 +47,29 @@ describe('ConfigStore', () => {
     const key = 'ctx-rt-' + Date.now();
     store.set(key, { contextTier: 'long_context' }, false);
     assert.equal(store.get(key).contextTier, 'long_context');
+  });
+
+  it('set() normalizes an invalid contextTier to "default"', () => {
+    const store = make();
+    const key = 'ctx-bad-' + Date.now();
+    store.set(key, { contextTier: 'bogus' as never }, false);
+    assert.equal(store.get(key).contextTier, 'default');
+  });
+
+  it('load() normalizes an invalid contextTier from a hand-edited file', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfgstore-bad-'));
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ contextTier: 'foo' }));
+    const store = new ConfigStore({ configDir: dir });
+    assert.equal(store.getGlobal().contextTier, 'default');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('normalizeContextTier maps unknown values to "default"', () => {
+    assert.equal(normalizeContextTier('long_context'), 'long_context');
+    assert.equal(normalizeContextTier('default'), 'default');
+    assert.equal(normalizeContextTier(''), 'default');
+    assert.equal(normalizeContextTier(undefined), 'default');
+    assert.equal(normalizeContextTier('bogus'), 'default');
   });
 
   it('thread overrides only affect that thread', () => {

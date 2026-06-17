@@ -662,7 +662,6 @@ async function main(): Promise<void> {
     workDir: (id: string) => workDir(id),
     bin,
     suspendSession,
-    archiveSession,
   };
 
   // ── Prompt handler (streaming + reactions) ──
@@ -835,6 +834,14 @@ async function main(): Promise<void> {
         if (unsupportedReasoning) c.reasoningEffort = '';
         if (unsupportedContextTier) c.contextTier = 'default';
         setCfg(chatId, c);
+        // Log the raw error so we capture the real (currently-unproven) message
+        // strings — the contextTier matcher above is a best-guess until we see one.
+        log.warn(
+          '[prompt:session] unsupported per-model option — reset + retry',
+          `reasoning=${unsupportedReasoning}`,
+          `contextTier=${unsupportedContextTier}`,
+          `error=${msg}`,
+        );
         const retryTag = unsupportedReasoning ? 'no-reasoning-effort' : 'default-context-tier';
         try {
           session = await getSession(chatId);

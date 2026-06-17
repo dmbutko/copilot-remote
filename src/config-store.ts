@@ -16,6 +16,10 @@ export function normalizeMessageMode(value: unknown): MessageMode {
   return value === 'immediate' ? 'immediate' : 'enqueue';
 }
 
+export function normalizeContextTier(value: unknown): ContextTier {
+  return value === 'long_context' ? 'long_context' : 'default';
+}
+
 export interface ChatConfig {
   showUsage: boolean;
   showThinking: boolean;
@@ -142,6 +146,9 @@ export class ConfigStore {
     if (updates.messageMode !== undefined) {
       normalizedUpdates.messageMode = normalizeMessageMode(updates.messageMode);
     }
+    if (updates.contextTier !== undefined) {
+      normalizedUpdates.contextTier = normalizeContextTier(updates.contextTier);
+    }
 
     if (isGlobal) {
       Object.assign(this.global, normalizedUpdates);
@@ -190,6 +197,7 @@ export class ConfigStore {
           ...data,
           model: process.env.COPILOT_REMOTE_MODEL ?? data.model ?? DEFAULT_CONFIG.model,
           messageMode: normalizeMessageMode(data.messageMode),
+          contextTier: normalizeContextTier(data.contextTier),
           autoApprove: { ...DEFAULT_CONFIG.autoApprove, ...(data.autoApprove ?? {}) },
         };
       }

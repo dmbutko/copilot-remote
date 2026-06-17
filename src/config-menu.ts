@@ -22,7 +22,6 @@ export interface ConfigMenuDeps {
   workDir: (id: string) => string;
   bin: string;
   suspendSession: (chatId: string) => void;
-  archiveSession: (chatId: string, explicitSessionId?: string) => Promise<void>;
 }
 
 function pfx(chatId: string, data: string): string {
@@ -121,10 +120,33 @@ export async function sendReasoningMenu(chatId: string, editId: number, deps: Co
   const c = configStore.get(chatId);
 
   let models: ModelInfo[] = [];
+  let loadFailed = false;
   try {
     models = await deps.listModels();
   } catch {
-    /* ignore — treated as "no supported efforts" below */
+    loadFailed = true;
+  }
+
+  const back = [[{ text: '← Back', data: pfx(chatId, 'cfg:back') }]];
+
+  // Distinguish the three "no menu" cases so the message isn't misleading:
+  if (!c.model) {
+    await client.editButtons(
+      chatId,
+      editId,
+      "🧠 *Reasoning Effort*\nSelect a model first — Default uses the CLI's own choice.",
+      back,
+    );
+    return;
+  }
+  if (loadFailed) {
+    await client.editButtons(
+      chatId,
+      editId,
+      "🧠 *Reasoning Effort*\n⚠️ Couldn't load model capabilities — try again.",
+      back,
+    );
+    return;
   }
 
   const modelInfo = models.find((m) => (m.id ?? m.name) === c.model);
@@ -135,7 +157,7 @@ export async function sendReasoningMenu(chatId: string, editId: number, deps: Co
       chatId,
       editId,
       `🧠 *Reasoning Effort*\n⚠️ ${c.model} does not support reasoning effort.`,
-      [[{ text: '← Back', data: pfx(chatId, 'cfg:back') }]],
+      back,
     );
     return;
   }
@@ -317,6 +339,12 @@ export async function handleConfigCallback(
 
   if (data.startsWith('reason:')) {
     const level = data.slice(7) === 'default' ? '' : data.slice(7);
+    // KNOWN LIMITATION: "Default" sets level='' which buildConfig OMITS. On a
+    // resumed session the SDK then restores the journaled effort, so switching
+    // back to Default may silently keep the previous level until a fresh session.
+    // Unlike contextTier (where 'default' is an explicit value we send), reasoning
+    // effort has no "use model default" override token — only 'none' (disable) or
+    // explicit levels. Accepted as mild for this bot; not worth a forced-fresh fix.
     const prev = cfg(chatId);
     await rebuildOrRevert(prev, { ...prev, reasoningEffort: level });
     await sendConfigMenu(chatId, deps, msgId);
@@ -324,8 +352,14 @@ export async function handleConfigCallback(
   }
 
   if (data.startsWith('ctx:')) {
+    const tier = data.slice(4);
+    // Validate against the known tiers; ignore anything else (stale/forged callback).
+    if (tier !== 'default' && tier !== 'long_context') {
+      await sendConfigMenu(chatId, deps, msgId);
+      return true;
+    }
     const prev = cfg(chatId);
-    await rebuildOrRevert(prev, { ...prev, contextTier: data.slice(4) as ContextTier });
+    await rebuildOrRevert(prev, { ...prev, contextTier: tier });
     await sendConfigMenu(chatId, deps, msgId);
     return true;
   }
