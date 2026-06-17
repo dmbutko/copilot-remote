@@ -7,7 +7,7 @@ import type {
   SubagentStartEvent,
 } from './session.js';
 import type { Client, MessageOptions, Button } from './client.js';
-import type { ModelInfo, PermissionRequest } from '@github/copilot-sdk';
+import type { PermissionRequest } from '@github/copilot-sdk';
 import { MockTelegramHarness } from './testing/mock-telegram-harness.js';
 import { TelegramClient } from './telegram.js';
 import { SessionStore } from './store.js';
@@ -651,13 +651,16 @@ async function main(): Promise<void> {
     configStore,
     sessions,
     sessionStore,
-    cachedModels: [],
-    setCachedModels: (models: ModelInfo[]) => {
-      configMenuDeps.cachedModels = models;
-    },
+    listModels: () =>
+      Session.listModelsShared({
+        binary: bin,
+        cliUrl: config.cliUrl,
+        githubToken: config.githubToken,
+        provider: config.provider,
+      }),
+    getSession,
     workDir: (id: string) => workDir(id),
     bin,
-    getSession,
     suspendSession,
     archiveSession,
   };

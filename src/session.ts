@@ -208,6 +208,22 @@ export class Session extends EventEmitter {
     await Session.getSharedClient(opts, false);
   }
 
+  /**
+   * List available models via the shared client WITHOUT creating or resuming a
+   * chat session. Models are account-level, so the picker must not depend on a
+   * (possibly broken) per-chat session. Uses getSharedClient so it awaits an
+   * in-flight prewarm and recreates after a reset.
+   */
+  static async listModelsShared(opts?: {
+    binary?: string;
+    cliUrl?: string;
+    githubToken?: string;
+    provider?: RemoteProviderConfig;
+  }): Promise<ModelInfo[]> {
+    const client = await Session.getSharedClient(opts, false);
+    return client.listModels();
+  }
+
   static async deletePersistedSession(
     sessionId: string,
     opts?: { binary?: string; cliUrl?: string; githubToken?: string; provider?: RemoteProviderConfig },

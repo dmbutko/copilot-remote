@@ -17,11 +17,10 @@ export interface ConfigMenuDeps {
   configStore: ConfigStore;
   sessions: Map<string, Session>;
   sessionStore: SessionStore;
-  cachedModels: ModelInfo[];
-  setCachedModels: (models: ModelInfo[]) => void;
+  listModels: () => Promise<ModelInfo[]>;
+  getSession: (chatId: string) => Promise<Session>;
   workDir: (id: string) => string;
   bin: string;
-  getSession: (chatId: string) => Promise<Session>;
   suspendSession: (chatId: string) => void;
   archiveSession: (chatId: string, explicitSessionId?: string) => Promise<void>;
 }
@@ -37,7 +36,7 @@ export async function sendConfigMenu(chatId: string, deps: ConfigMenuDeps, editI
 
   const text =
     '⚙️ *Settings*\nModel: `' +
-    c.model +
+    (c.model || 'Default') +
     '`\n' +
     (c.autopilot ? '🟢 Autopilot' : '🔴 Ask before acting') +
     (c.agent ? '\nAgent: `' + c.agent + '`' : '') +
@@ -118,22 +117,17 @@ export async function sendToolsMenu(chatId: string, editId: number, deps: Config
 }
 
 export async function sendReasoningMenu(chatId: string, editId: number, deps: ConfigMenuDeps): Promise<void> {
-  const { client, configStore, sessions } = deps;
+  const { client, configStore } = deps;
   const c = configStore.get(chatId);
 
-  if (!deps.cachedModels.length) {
-    const s = sessions.get(chatId);
-    if (s?.alive) {
-      try {
-        const models = await s.listModels();
-        deps.setCachedModels(models);
-      } catch {
-        /* ignore */
-      }
-    }
+  let models: ModelInfo[] = [];
+  try {
+    models = await deps.listModels();
+  } catch {
+    /* ignore — treated as "no supported efforts" below */
   }
 
-  const modelInfo = deps.cachedModels.find((m) => (m.id ?? m.name) === c.model);
+  const modelInfo = models.find((m) => (m.id ?? m.name) === c.model);
   const supported: string[] = modelInfo?.supportedReasoningEfforts ?? [];
 
   if (!supported.length) {
@@ -234,27 +228,28 @@ export async function sendSecurityMenu(chatId: string, editId: number, deps: Con
 }
 
 export async function sendModelPicker(chatId: string, editId: number, deps: ConfigMenuDeps): Promise<void> {
-  const { client, configStore, sessions } = deps;
+  const { client, configStore } = deps;
   const c = configStore.get(chatId);
 
-  if (!deps.cachedModels.length) {
-    try {
-      let s = sessions.get(chatId);
-      if (!s?.alive) s = await deps.getSession(chatId);
-      const models = await s.listModels();
-      deps.setCachedModels(models);
-      log.info(
-        'Models:',
-        models.map((m) => m.id ?? m.name ?? m),
-      );
-    } catch {
-      /* ignore */
-    }
+  let models: ModelInfo[] = [];
+  try {
+    models = await deps.listModels();
+  } catch (e) {
+    log.warn('[config] listModels failed:', e);
   }
 
-  const modelIds = deps.cachedModels.length
-    ? deps.cachedModels.map((m) => m.id ?? m.name ?? String(m)).filter(Boolean)
-    : ['claude-sonnet-4', 'gpt-5.2', 'gemini-3-pro-preview'];
+  const modelIds = models.map((m) => m.id ?? m.name ?? '').filter(Boolean);
+
+  // Fail closed: never render a hardcoded/fake list. If listing failed, show an
+  // explicit error + retry so the user can't select an unvalidated model.
+  if (!modelIds.length) {
+    await client.editButtons(chatId, editId, "🤖 *Select Model*\n⚠️ Couldn't load models — try again.", [
+      [{ text: '🔄 Retry', data: pfx(chatId, 'cfg:modelPicker') }],
+      [{ text: '← Back', data: pfx(chatId, 'cfg:back') }],
+    ]);
+    return;
+  }
+  log.info('Models:', modelIds);
 
   const buttons: { text: string; data: string; style?: string }[][] = [];
   for (let i = 0; i < modelIds.length; i += 2) {
@@ -271,33 +266,20 @@ export async function sendModelPicker(chatId: string, editId: number, deps: Conf
 }
 
 /**
- * Rebuild the chat's persisted session after a config change (model / reasoning effort /
- * context tier). Disconnects the live session and resumes it under the current config so
- * the new setting takes effect; on failure, suspends and lazily recreates on next use.
+ * Rebuild the chat's session after a config change by suspending the live
+ * session and going through the canonical getSession() path (startOrResume),
+ * which resumes with FULL options (transport + mcpServers) AND registers the
+ * persistent session listeners (permissions, notifications, hooks). THROWS on
+ * failure so callers can revert/notify. The new config is already persisted via
+ * setCfg() before this runs, so getSession picks it up.
+ *
+ * Do NOT hand-roll s.resume() here: it bypasses listener registration (the
+ * session would relay nothing) and the shared-client signature (partial opts
+ * without githubToken mismatch the prewarm and always throw).
  */
-async function rebuildSavedSession(chatId: string, c: ChatConfig, deps: ConfigMenuDeps): Promise<void> {
-  const { sessions, sessionStore } = deps;
-  const old = sessions.get(chatId);
-  const savedId = old?.sessionId ?? sessionStore.get(chatId)?.sessionId;
-  if (old?.alive) await old.disconnect();
-  sessions.delete(chatId);
-  if (!savedId) return;
-  const { Session } = await import('./session.js');
-  const s = new Session();
-  try {
-    await s.resume(savedId, {
-      cwd: deps.workDir(chatId),
-      binary: deps.bin,
-      model: c.model,
-      autopilot: c.autopilot,
-      reasoningEffort: (c.reasoningEffort || undefined) as 'low' | 'medium' | 'high' | 'xhigh' | undefined,
-      contextTier: c.contextTier,
-    });
-    sessions.set(chatId, s);
-  } catch {
-    deps.suspendSession(chatId);
-    await deps.getSession(chatId);
-  }
+async function rebuildSavedSession(chatId: string, deps: ConfigMenuDeps): Promise<void> {
+  deps.suspendSession(chatId);
+  await deps.getSession(chatId);
 }
 
 /** Handle all config-related callbacks. Returns true if handled. */
@@ -312,21 +294,38 @@ export async function handleConfigCallback(
   const cfg = (key: string) => configStore.get(key);
   const setCfg = (key: string, updates: Partial<ChatConfig>) => configStore.set(key, updates, true);
 
+  // Apply a config change by rebuilding the saved session. On failure, suspend
+  // the (already-deleted) live session so the next message lazily recreates.
+  // revertOnFailure=true (reason/ctx): restore the prior config. =false (model):
+  // KEEP the validated new model — reverting could re-pin a bad prior config and
+  // re-lock the user; a fresh session next message will use the new model.
+  const rebuildOrRevert = async (prev: ChatConfig, next: ChatConfig, revertOnFailure = true): Promise<void> => {
+    setCfg(chatId, next);
+    try {
+      await rebuildSavedSession(chatId, deps);
+    } catch (e) {
+      log.warn('[config] rebuild failed:', e);
+      deps.suspendSession(chatId);
+      if (revertOnFailure) {
+        setCfg(chatId, prev);
+        client.answerCallback?.(callbackId, "Couldn't apply change — reverted.");
+      } else {
+        client.answerCallback?.(callbackId, "Saved — old session couldn't resume; next message starts fresh.");
+      }
+    }
+  };
+
   if (data.startsWith('reason:')) {
     const level = data.slice(7) === 'default' ? '' : data.slice(7);
-    const c = cfg(chatId);
-    c.reasoningEffort = level;
-    setCfg(chatId, c);
-    await rebuildSavedSession(chatId, c, deps);
+    const prev = cfg(chatId);
+    await rebuildOrRevert(prev, { ...prev, reasoningEffort: level });
     await sendConfigMenu(chatId, deps, msgId);
     return true;
   }
 
   if (data.startsWith('ctx:')) {
-    const c = cfg(chatId);
-    c.contextTier = data.slice(4) as ContextTier;
-    setCfg(chatId, c);
-    await rebuildSavedSession(chatId, c, deps);
+    const prev = cfg(chatId);
+    await rebuildOrRevert(prev, { ...prev, contextTier: data.slice(4) as ContextTier });
     await sendConfigMenu(chatId, deps, msgId);
     return true;
   }
@@ -417,10 +416,29 @@ export async function handleConfigCallback(
   }
 
   if (data.startsWith('model:')) {
-    const c = cfg(chatId);
-    c.model = data.slice(6);
-    setCfg(chatId, c);
-    await rebuildSavedSession(chatId, c, deps);
+    const sel = data.slice(6);
+    let models: ModelInfo[] = [];
+    try {
+      models = await deps.listModels();
+    } catch (e) {
+      log.warn('[config] listModels failed during select:', e);
+    }
+    const info = models.find((m) => (m.id ?? m.name) === sel);
+    // Validate against the live list — reject stale-button / unknown IDs so a bad
+    // model can never be persisted (the original lockout cause).
+    if (!info) {
+      client.answerCallback?.(callbackId, 'Model unavailable — refresh the list.');
+      await sendModelPicker(chatId, msgId, deps);
+      return true;
+    }
+    const prev = cfg(chatId);
+    const next: ChatConfig = { ...prev, model: sel };
+    // Clear an incompatible reasoning effort BEFORE rebuild, else the switch fails
+    // and reverts — blocking recovery from an already-bad config.
+    if (next.reasoningEffort && !((info.supportedReasoningEfforts ?? []) as string[]).includes(next.reasoningEffort)) {
+      next.reasoningEffort = '';
+    }
+    await rebuildOrRevert(prev, next, false);
     await sendConfigMenu(chatId, deps, msgId);
     return true;
   }

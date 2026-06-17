@@ -81,7 +81,7 @@ export const DEFAULT_CONFIG: ChatConfig = {
   showReactions: true,
   autopilot: false,
   mode: 'interactive',
-  model: 'claude-sonnet-4',
+  model: '',
   agent: null,
   reasoningEffort: '',
   contextTier: 'default',

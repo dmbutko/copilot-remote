@@ -53,6 +53,7 @@ function createDeps(initialConfig?: Partial<ChatConfig>) {
     },
     cachedModels: [],
     setCachedModels: () => {},
+    listModels: async () => [],
     workDir: () => '/tmp/project',
     bin: 'copilot',
     getSession: async () => ({ alive: true }),
