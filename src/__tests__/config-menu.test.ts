@@ -71,7 +71,8 @@ describe('config-menu', () => {
     const firstCall = deps.client.sendButtonsCalls[0];
     assert.ok(firstCall);
     const buttons = firstCall.buttons as Array<Array<{ text: string }>>;
-    assert.equal(buttons[3]?.[0]?.text, '📨 Messages: Queue next message');
+    const messagesBtn = buttons.find((row) => row[0]?.text?.startsWith('📨 Messages'))?.[0];
+    assert.equal(messagesBtn?.text, '📨 Messages: Queue next message');
   });
 
   it('toggles message mode and updates the live session setting', async () => {
@@ -88,7 +89,8 @@ describe('config-menu', () => {
     const lastEdit = deps.client.editButtonsCalls.at(-1);
     assert.ok(lastEdit);
     const buttons = lastEdit?.buttons as Array<Array<{ text: string }>>;
-    assert.equal(buttons[3]?.[0]?.text, '📨 Messages: Interrupt current turn');
+    const messagesBtn = buttons.find((row) => row[0]?.text?.startsWith('📨 Messages'))?.[0];
+    assert.equal(messagesBtn?.text, '📨 Messages: Interrupt current turn');
   });
 
   it('toggles display settings and answers the callback with the new state', async () => {

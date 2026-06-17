@@ -6,6 +6,7 @@ import {
   approveAll,
   type SessionEvent,
   type ModelInfo,
+  type ContextTier,
   type PermissionRequest,
   type PermissionRequestResult,
   type SessionConfig,
@@ -40,6 +41,7 @@ export interface SessionOptions {
   autopilot?: boolean;
   agent?: string;
   reasoningEffort?: ReasoningEffort;
+  contextTier?: ContextTier;
   topicContext?: string;
   githubToken?: string;
   infiniteSessions?: boolean;
@@ -431,6 +433,7 @@ export class Session extends EventEmitter {
       }),
       ...(opts.model ? { model: opts.model } : {}),
       ...(opts.reasoningEffort ? { reasoningEffort: opts.reasoningEffort } : {}),
+      ...(opts.contextTier ? { contextTier: opts.contextTier } : {}),
       ...(opts.provider ? { provider: opts.provider } : {}),
       ...(opts.mcpServers ? { mcpServers: opts.mcpServers } : {}),
       ...(opts.customAgents ? { customAgents: opts.customAgents as SessionConfig['customAgents'] } : {}),

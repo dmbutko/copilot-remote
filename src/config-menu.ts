@@ -1,6 +1,6 @@
 // Copilot Remote — Config menu UI (/config command and callback handlers)
 import type { Client, Button } from './client.js';
-import type { ChatConfig, PermKind } from './config-store.js';
+import type { ChatConfig, ContextTier, PermKind } from './config-store.js';
 import type { ConfigStore } from './config-store.js';
 import type { Session } from './session.js';
 import type { ModelInfo } from '@github/copilot-sdk';
@@ -54,6 +54,7 @@ export async function sendConfigMenu(chatId: string, deps: ConfigMenuDeps, editI
     ],
     [{ text: '🤖 Change Model', data: pfx(chatId, 'cfg:modelPicker') }],
     [{ text: `🧠 Reasoning: ${c.reasoningEffort || 'Default'}`, data: pfx(chatId, 'cfg:reasoning') }],
+    [{ text: `🪟 Context: ${c.contextTier === 'long_context' ? 'Long' : 'Default'}`, data: pfx(chatId, 'cfg:context') }],
     [{ text: `📨 Messages: ${messageModeLabel(c.messageMode)}`, data: pfx(chatId, 'cfg:messageMode') }],
     [
       {
@@ -166,6 +167,30 @@ export async function sendReasoningMenu(chatId: string, editId: number, deps: Co
   );
 }
 
+export async function sendContextMenu(chatId: string, editId: number, deps: ConfigMenuDeps): Promise<void> {
+  const { client, configStore } = deps;
+  const c = configStore.get(chatId);
+
+  const tiers: { value: ContextTier; label: string }[] = [
+    { value: 'default', label: 'Default' },
+    { value: 'long_context', label: 'Long Context' },
+  ];
+  const buttons = tiers.map((t) => [
+    {
+      text: t.label,
+      data: pfx(chatId, `ctx:${t.value}`),
+      ...(t.value === c.contextTier ? { style: 'success' } : {}),
+    },
+  ]);
+  buttons.push([{ text: '← Back', data: pfx(chatId, 'cfg:back') }]);
+  await client.editButtons(
+    chatId,
+    editId,
+    '🪟 *Context Window*\nLong context only applies on models that support it:',
+    buttons,
+  );
+}
+
 export async function sendDisplayMenu(chatId: string, editId: number, deps: ConfigMenuDeps): Promise<void> {
   const { client, configStore } = deps;
   const c = configStore.get(chatId);
@@ -245,6 +270,36 @@ export async function sendModelPicker(chatId: string, editId: number, deps: Conf
   await client.editButtons(chatId, editId, '🤖 *Select Model*', buttons);
 }
 
+/**
+ * Rebuild the chat's persisted session after a config change (model / reasoning effort /
+ * context tier). Disconnects the live session and resumes it under the current config so
+ * the new setting takes effect; on failure, suspends and lazily recreates on next use.
+ */
+async function rebuildSavedSession(chatId: string, c: ChatConfig, deps: ConfigMenuDeps): Promise<void> {
+  const { sessions, sessionStore } = deps;
+  const old = sessions.get(chatId);
+  const savedId = old?.sessionId ?? sessionStore.get(chatId)?.sessionId;
+  if (old?.alive) await old.disconnect();
+  sessions.delete(chatId);
+  if (!savedId) return;
+  const { Session } = await import('./session.js');
+  const s = new Session();
+  try {
+    await s.resume(savedId, {
+      cwd: deps.workDir(chatId),
+      binary: deps.bin,
+      model: c.model,
+      autopilot: c.autopilot,
+      reasoningEffort: (c.reasoningEffort || undefined) as 'low' | 'medium' | 'high' | 'xhigh' | undefined,
+      contextTier: c.contextTier,
+    });
+    sessions.set(chatId, s);
+  } catch {
+    deps.suspendSession(chatId);
+    await deps.getSession(chatId);
+  }
+}
+
 /** Handle all config-related callbacks. Returns true if handled. */
 export async function handleConfigCallback(
   data: string,
@@ -253,7 +308,7 @@ export async function handleConfigCallback(
   callbackId: string,
   deps: ConfigMenuDeps,
 ): Promise<boolean> {
-  const { client, configStore, sessions, sessionStore } = deps;
+  const { client, configStore, sessions } = deps;
   const cfg = (key: string) => configStore.get(key);
   const setCfg = (key: string, updates: Partial<ChatConfig>) => configStore.set(key, updates, true);
 
@@ -262,33 +317,26 @@ export async function handleConfigCallback(
     const c = cfg(chatId);
     c.reasoningEffort = level;
     setCfg(chatId, c);
-    const old = sessions.get(chatId);
-    const savedId = old?.sessionId ?? sessionStore.get(chatId)?.sessionId;
-    if (old?.alive) await old.disconnect();
-    sessions.delete(chatId);
-    if (savedId) {
-      const { Session } = await import('./session.js');
-      const s = new Session();
-      try {
-        await s.resume(savedId, {
-          cwd: deps.workDir(chatId),
-          binary: deps.bin,
-          model: c.model,
-          autopilot: c.autopilot,
-          reasoningEffort: level as 'low' | 'medium' | 'high' | 'xhigh',
-        });
-        sessions.set(chatId, s);
-      } catch {
-        deps.suspendSession(chatId);
-        await deps.getSession(chatId);
-      }
-    }
+    await rebuildSavedSession(chatId, c, deps);
+    await sendConfigMenu(chatId, deps, msgId);
+    return true;
+  }
+
+  if (data.startsWith('ctx:')) {
+    const c = cfg(chatId);
+    c.contextTier = data.slice(4) as ContextTier;
+    setCfg(chatId, c);
+    await rebuildSavedSession(chatId, c, deps);
     await sendConfigMenu(chatId, deps, msgId);
     return true;
   }
 
   if (data === 'cfg:reasoning') {
     await sendReasoningMenu(chatId, msgId, deps);
+    return true;
+  }
+  if (data === 'cfg:context') {
+    await sendContextMenu(chatId, msgId, deps);
     return true;
   }
   if (data === 'cfg:display') {
@@ -372,27 +420,7 @@ export async function handleConfigCallback(
     const c = cfg(chatId);
     c.model = data.slice(6);
     setCfg(chatId, c);
-    const old = sessions.get(chatId);
-    const savedId = old?.sessionId ?? sessionStore.get(chatId)?.sessionId;
-    if (old?.alive) await old.disconnect();
-    sessions.delete(chatId);
-    if (savedId) {
-      const { Session } = await import('./session.js');
-      const s = new Session();
-      try {
-        await s.resume(savedId, {
-          cwd: deps.workDir(chatId),
-          binary: deps.bin,
-          model: c.model,
-          autopilot: c.autopilot,
-          reasoningEffort: (c.reasoningEffort || undefined) as 'low' | 'medium' | 'high' | 'xhigh' | undefined,
-        });
-        sessions.set(chatId, s);
-      } catch {
-        deps.suspendSession(chatId);
-        await deps.getSession(chatId);
-      }
-    }
+    await rebuildSavedSession(chatId, c, deps);
     await sendConfigMenu(chatId, deps, msgId);
     return true;
   }

@@ -570,6 +570,7 @@ async function main(): Promise<void> {
       model: c.model,
       autopilot: c.autopilot,
       reasoningEffort: c.reasoningEffort ? (c.reasoningEffort as 'low' | 'medium' | 'high' | 'xhigh') : undefined,
+      contextTier: c.contextTier,
       agent: c.agent ?? undefined,
       topicContext: client.getTopicName?.(chatId),
       githubToken: config.githubToken,
@@ -822,14 +823,20 @@ async function main(): Promise<void> {
       );
     } catch (err: unknown) {
       const msg = (err as Error)?.message ?? String(err);
-      // If reasoning effort not supported, retry without it
-      if (msg.includes('reasoning effort')) {
-        c.reasoningEffort = '';
+      const lower = msg.toLowerCase();
+      // If an unsupported per-model setting was requested, reset it and retry once.
+      const unsupportedReasoning = msg.includes('reasoning effort');
+      const unsupportedContextTier =
+        lower.includes('long_context') || (lower.includes('context') && lower.includes('tier'));
+      if (unsupportedReasoning || unsupportedContextTier) {
+        if (unsupportedReasoning) c.reasoningEffort = '';
+        if (unsupportedContextTier) c.contextTier = 'default';
         setCfg(chatId, c);
+        const retryTag = unsupportedReasoning ? 'no-reasoning-effort' : 'default-context-tier';
         try {
           session = await getSession(chatId);
           sessionReadyAt = performance.now();
-          markTimeline('session', `id=${session.sessionId ?? '-'};retry=no-reasoning-effort`, sessionReadyAt);
+          markTimeline('session', `id=${session.sessionId ?? '-'};retry=${retryTag}`, sessionReadyAt);
           log.info(
             '[prompt:session]',
             `req=${promptTraceId}`,
@@ -838,7 +845,7 @@ async function main(): Promise<void> {
             `msg=${msgId}`,
             `sessionId=${session.sessionId ?? '-'}`,
             `busy=${session.busy}`,
-            'retry=no-reasoning-effort',
+            `retry=${retryTag}`,
           );
         } catch (err2: unknown) {
           if (typingInterval) clearInterval(typingInterval);

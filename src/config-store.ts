@@ -10,6 +10,7 @@ export const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
 
 export type PermKind = 'shell' | 'write' | 'mcp' | 'read' | 'url' | 'custom-tool';
 export type MessageMode = 'enqueue' | 'immediate';
+export type ContextTier = 'default' | 'long_context';
 
 export function normalizeMessageMode(value: unknown): MessageMode {
   return value === 'immediate' ? 'immediate' : 'enqueue';
@@ -25,6 +26,7 @@ export interface ChatConfig {
   model: string;
   agent: string | null;
   reasoningEffort: string;
+  contextTier: ContextTier;
   messageMode: MessageMode;
   infiniteSessions: boolean | undefined;
   excludedTools: string[];
@@ -82,6 +84,7 @@ export const DEFAULT_CONFIG: ChatConfig = {
   model: 'claude-sonnet-4',
   agent: null,
   reasoningEffort: '',
+  contextTier: 'default',
   messageMode: 'enqueue',
   infiniteSessions: undefined,
   excludedTools: [],

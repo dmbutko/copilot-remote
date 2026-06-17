@@ -610,6 +610,17 @@ describe('Session', () => {
     });
   });
 
+  it('passes contextTier through to the SDK session config, including "default"', () => {
+    const session = new Session() as any;
+    session.cwd = '/tmp/project';
+    // Explicit "default" must be sent (not omitted) so resume reverts a journaled long_context tier.
+    assert.equal(session.buildConfig({ cwd: '/tmp/project', contextTier: 'default' }).contextTier, 'default');
+    assert.equal(
+      session.buildConfig({ cwd: '/tmp/project', contextTier: 'long_context' }).contextTier,
+      'long_context',
+    );
+  });
+
   it('deletePersistedSession uses the shared client without retaining it', async () => {
     const originalGetSharedClient = (Session as any).getSharedClient;
     const deleted: string[] = [];

@@ -41,6 +41,14 @@ describe('ConfigStore', () => {
     store.set('chat1', { model: before }, true);
   });
 
+  it('contextTier defaults to "default" and round-trips', () => {
+    const store = make();
+    assert.equal(store.get('ctx-default-' + Date.now()).contextTier, 'default');
+    const key = 'ctx-rt-' + Date.now();
+    store.set(key, { contextTier: 'long_context' }, false);
+    assert.equal(store.get(key).contextTier, 'long_context');
+  });
+
   it('thread overrides only affect that thread', () => {
     const store = make();
     const globalModel = store.getGlobal().model;
