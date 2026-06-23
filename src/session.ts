@@ -381,6 +381,7 @@ export class Session extends EventEmitter {
       'You are running via copilot-remote, a Telegram bridge for GitHub Copilot CLI.',
       'You have custom Telegram tools: send_notification, send_file, send_photo, send_location, send_voice, pin_message, create_topic, react, send_contact, create_poll.',
       'Use these tools when the user asks to send files, photos, locations, or when you want to push rich content back to the chat.',
+      'Never claim you already delivered something the user says they did not receive. If a background agent result was delayed or dropped, say so plainly and deliver it now.',
       ...(opts.topicContext
         ? [`This conversation is in a Telegram forum topic: "${opts.topicContext}". Stay focused on this subject.`]
         : []),
@@ -738,8 +739,10 @@ export class Session extends EventEmitter {
     if (!this._alive) throw new Error('Session not started');
 
     return this.runInSendQueue(async () => {
+      const turnStartedAtMs = Date.now();
       let onDelta: ((event: SessionStreamEvent) => void) | null = null;
       let errorHandler: ((msg: string) => void) | null = null;
+      let rawUnsub: (() => void) | null = null;
 
       let askUserMsgId: string | null = null;
       const unsubscribeAskUserMsg = opts?.askMode
@@ -756,6 +759,65 @@ export class Session extends EventEmitter {
           text += event.text;
         };
         this.on('delta_event', onDelta);
+
+        // Background-agent follow-up capture. Since CLI 1.0.60 the runtime returns
+        // control at the first `session.idle` when a background agent is launched,
+        // then fires a `system.notification` (agent_completed/idle) that triggers a
+        // NEW interaction (read_agent + synthesis) AFTER `sendAndWait` has resolved.
+        // That synthesis is the answer the user wants, but it lands too late for the
+        // normal return path. We watch raw SDK events to detect the completion and
+        // capture the follow-up interaction's final message. See captureBackgroundFollowups.
+        const bg = {
+          sawActivity: false,
+          completions: 0,
+          idles: 0,
+          turnStarts: 0,
+          capturing: false,
+          followupId: null as string | null,
+          followupContent: '',
+          wake: null as (() => void) | null,
+        };
+        const wakeBg = () => {
+          const w = bg.wake;
+          bg.wake = null;
+          w?.();
+        };
+        rawUnsub = this.session!.on((ev: SessionEvent) => {
+          switch (ev.type) {
+            case 'subagent.started':
+            case 'session.background_tasks_changed':
+              bg.sawActivity = true;
+              break;
+            case 'system.notification':
+              if (!ev.agentId && (ev.data.kind.type === 'agent_completed' || ev.data.kind.type === 'agent_idle')) {
+                bg.sawActivity = true;
+                bg.completions += 1;
+                wakeBg();
+              }
+              break;
+            case 'assistant.turn_start':
+              if (!ev.agentId) {
+                bg.turnStarts += 1;
+                if (bg.capturing && !bg.followupId) bg.followupId = ev.data.interactionId ?? null;
+                wakeBg();
+              }
+              break;
+            case 'assistant.message':
+              // While capturing a follow-up, keep the latest non-empty message from
+              // that interaction (filtered by interactionId) as the synthesis to deliver.
+              if (!ev.agentId && bg.capturing && ev.data.content && (!bg.followupId || ev.data.interactionId === bg.followupId)) {
+                bg.followupContent = ev.data.content;
+              }
+              break;
+            case 'session.idle':
+              // Only the root agent's idle matters; sub-agent idles carry an agentId.
+              if (!ev.agentId) {
+                bg.idles += 1;
+                wakeBg();
+              }
+              break;
+          }
+        });
 
         // Reject if session emits an error (e.g. auth failure)
         const errorPromise = new Promise<never>((_, rej) => {
@@ -794,14 +856,27 @@ export class Session extends EventEmitter {
         const resultObj = result as unknown as Record<string, unknown>;
         const resultData = (resultObj?.data as Record<string, unknown>) ?? {};
 
-        return {
-          content:
-            text.trim() ||
-            (typeof resultData?.content === 'string' ? resultData.content : '') ||
-            (typeof resultObj?.content === 'string' ? resultObj.content : '') ||
-            (typeof result === 'string' ? result : '') ||
-            '_(no response)_',
-        };
+        let content =
+          text.trim() ||
+          (typeof resultData?.content === 'string' ? resultData.content : '') ||
+          (typeof resultObj?.content === 'string' ? resultObj.content : '') ||
+          (typeof result === 'string' ? result : '') ||
+          '_(no response)_';
+
+        // If a background agent ran this turn, the real answer may be produced in a
+        // post-idle follow-up interaction. Wait for and prefer that synthesis; if none
+        // is captured, prefer the SDK's final result over a bare "hang tight" placeholder.
+        if (bg.sawActivity) {
+          const followup = await this.captureBackgroundFollowups(bg, turnStartedAtMs);
+          if (followup) {
+            content = followup;
+          } else {
+            const sdkContent = typeof resultData?.content === 'string' ? resultData.content.trim() : '';
+            if (sdkContent.length > content.trim().length) content = sdkContent;
+          }
+        }
+
+        return { content };
       } catch (error) {
         if (!reservation.currentTurnId) {
           this.cancelTurnReservation(reservation, error instanceof Error ? error.message : String(error));
@@ -813,6 +888,7 @@ export class Session extends EventEmitter {
         }
         if (onDelta) this.off('delta_event', onDelta);
         if (errorHandler) this.off('error', errorHandler);
+        if (rawUnsub) rawUnsub();
         // /ask: drop the ask turn (user msg + assistant reply + tool events) from session history
         // so it doesn't pollute future context. Best-effort; truncate is @experimental in SDK.
         if (opts?.askMode && askUserMsgId) {
@@ -826,6 +902,90 @@ export class Session extends EventEmitter {
         unsubscribeAskUserMsg?.();
       }
     });
+  }
+
+  /**
+   * After `sendAndWait` resolves on the first `session.idle`, a background agent that
+   * finished may have triggered (via a post-idle agent-completion `system.notification`)
+   * a fresh CLI interaction that runs `read_agent` and synthesizes the real answer.
+   * That interaction lands after `sendAndWait` returned, so its output is otherwise
+   * dropped. This waits for those follow-up interaction(s) and returns the final
+   * synthesis. Only invoked when a background agent was active this turn, so normal
+   * turns pay zero latency. The `bg` state is mutated by the raw SDK listener in send().
+   */
+  private async captureBackgroundFollowups(
+    bg: {
+      completions: number;
+      idles: number;
+      turnStarts: number;
+      capturing: boolean;
+      followupId: string | null;
+      followupContent: string;
+      wake: (() => void) | null;
+    },
+    turnStartedAtMs: number,
+  ): Promise<string | null> {
+    const NOTIFICATION_GRACE_MS = 2_000; // wait this long after an idle for an agent-completion notification
+    const FOLLOWUP_START_GRACE_MS = 8_000; // wait this long for the model to start the read_agent follow-up
+    const SYNTHESIS_TIMEOUT_MS = 180_000; // max wait for one follow-up interaction to reach idle
+    const OVERALL_CAP_MS = this._turnTimeoutMs ?? 30 * 60 * 1000;
+
+    const waitUntil = (pred: () => boolean, timeoutMs: number): Promise<boolean> =>
+      new Promise<boolean>((resolve) => {
+        if (pred()) {
+          resolve(true);
+          return;
+        }
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const check = () => {
+          if (pred()) {
+            if (timer) clearTimeout(timer);
+            bg.wake = null;
+            resolve(true);
+          } else {
+            bg.wake = check; // re-arm for the next event
+          }
+        };
+        bg.wake = check;
+        timer = setTimeout(() => {
+          bg.wake = null;
+          resolve(false);
+        }, timeoutMs);
+      });
+
+    const results: string[] = [];
+    let completionsConsumed = 0;
+    let idlesConsumed = bg.idles;
+    let turnStartsConsumed = bg.turnStarts;
+
+    // Loop while background agents keep completing; bounded by the notification grace
+    // (gives up when no further completion arrives) and the overall turn cap.
+    while (Date.now() - turnStartedAtMs < OVERALL_CAP_MS) {
+      const gotCompletion = await waitUntil(() => bg.completions > completionsConsumed, NOTIFICATION_GRACE_MS);
+      if (!gotCompletion) break;
+      completionsConsumed += 1;
+
+      bg.capturing = true;
+      bg.followupId = null;
+      bg.followupContent = '';
+      // Only block on a synthesis if the model actually starts a follow-up interaction;
+      // a completion with no follow-up turn must not stall the turn for the full timeout.
+      const started = await waitUntil(() => bg.turnStarts > turnStartsConsumed, FOLLOWUP_START_GRACE_MS);
+      if (started) {
+        const synthesized = await waitUntil(() => bg.idles > idlesConsumed, SYNTHESIS_TIMEOUT_MS);
+        idlesConsumed = bg.idles;
+        if (!synthesized) {
+          log.warn(
+            '[followup] synthesis wait timed out',
+            ...formatLogFields({ sessionId: this.sessionId, capMs: SYNTHESIS_TIMEOUT_MS }),
+          );
+        }
+      }
+      bg.capturing = false;
+      turnStartsConsumed = bg.turnStarts;
+      if (bg.followupContent.trim()) results.push(bg.followupContent.trim());
+    }
+    return results.length ? results.join('\n\n---\n\n') : null;
   }
 
   /** Send a side question whose user message and response are removed from session history. */
