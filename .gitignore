@@ -8,6 +8,8 @@ dist/
 *.log
 .bot.pid
 config.json
+config.json.bak*
+config.json.tmp*
 chat-sessions.json
 work-dirs.json
 copilot-remote.lock/
