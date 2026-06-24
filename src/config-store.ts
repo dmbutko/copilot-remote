@@ -54,6 +54,21 @@ export interface GlobalConfig {
   availableTools?: string[];
   excludedTools?: string[];
   /**
+   * Optional external command invoked on each user prompt to supply additional
+   * model context. `command` must be an EXECUTABLE PATH (run via execFile, no
+   * shell — a string like "bash foo.sh" will not work; point at an executable
+   * with a shebang). It is run with the session id as its single argv argument;
+   * its stdout (if any) is PREPENDED to the user's prompt for that turn via the
+   * hook's modifiedPrompt. (The host CLI parses but does not inject a
+   * userPromptSubmitted hook's additionalContext — verified through CLI 1.0.64 —
+   * so modifiedPrompt is used instead.)
+   * Absent ⇒ feature OFF. The bridge treats stdout as opaque and has NO knowledge
+   * of the command's meaning; non-zero exit / timeout / error / stdout exceeding
+   * `maxBytes` ⇒ no context injected (fail-open, never blocks the message; the
+   * failure is logged at debug level). Defaults: timeoutMs 2000, maxBytes 65536.
+   */
+  promptContextProvider?: { command: string; timeoutMs?: number; maxBytes?: number };
+  /**
    * When true (default), passes `enableConfigDiscovery: true` to the underlying CLI
    * session. This activates the CLI's built-in github-mcp-server injection (and
    * `web_search`), plus discovery of MCP servers / plugins / disabledMcpServers /

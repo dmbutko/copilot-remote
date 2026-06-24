@@ -17,6 +17,9 @@ import {
 /** SDK-compatible file attachment */
 export type FileAttachment = NonNullable<MessageOptions['attachments']>[number];
 import { EventEmitter } from 'events';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+const execFileAsync = promisify(execFile);
 import { log } from './log.js';
 import type { RemoteProviderConfig } from './provider-config.js';
 import type { MCPServerConfig } from './mcp-config.js';
@@ -55,6 +58,8 @@ export interface SessionOptions {
   systemInstructions?: string;
   availableTools?: string[];
   excludedTools?: string[];
+  /** External command run per prompt; its stdout is prepended to the prompt via modifiedPrompt. See GlobalConfig.promptContextProvider. */
+  promptContextProvider?: { command: string; timeoutMs?: number; maxBytes?: number };
   /**
    * Passes through to `SessionConfig.enableConfigDiscovery`. When true, the CLI
    * auto-injects `github-mcp-server` (with bearer-token Authorization header
@@ -503,8 +508,31 @@ export class Session extends EventEmitter {
           }
           return undefined;
         },
-        onUserPromptSubmitted: async (input: { prompt?: string }) => {
+        onUserPromptSubmitted: async (input: { prompt?: string }, invocation: { sessionId: string }) => {
           this.emit('hook:user_prompt', { prompt: input.prompt });
+          // Optional per-prompt context provider (see GlobalConfig.promptContextProvider).
+          // Generic + config-driven: the bridge runs the configured command with the
+          // session id as argv and PREPENDS its stdout to the prompt. Fail-open: any error /
+          // timeout / non-zero exit / empty output ⇒ no context (never blocks the turn).
+          // NOTE: uses modifiedPrompt, NOT additionalContext — the host CLI parses but never
+          // injects a userPromptSubmitted hook's additionalContext (verified through CLI 1.0.64);
+          // only modifiedPrompt is consumed for this hook. Do not "simplify" back.
+          const provider = opts.promptContextProvider;
+          if (provider?.command && input.prompt) {
+            try {
+              const { stdout } = await execFileAsync(provider.command, [invocation.sessionId], {
+                timeout: provider.timeoutMs ?? 2000,
+                maxBuffer: provider.maxBytes ?? 65536,
+              });
+              const ctx = stdout.trim();
+              if (ctx) return { modifiedPrompt: `${ctx}\n\n${input.prompt}` };
+            } catch (e) {
+              // fail-open: inject nothing. Log so silent failures (timeout, non-zero
+              // exit, oversize stdout > maxBuffer) are observable in the bridge journal.
+              log.debug('[promptContextProvider] failed; no context injected:', (e as Error)?.message ?? e);
+            }
+          }
+          return undefined;
         },
       },
     };

@@ -623,6 +623,7 @@ async function main(): Promise<void> {
       })(),
       disabledSkills: globalCfg.disabledSkills,
       systemInstructions: globalCfg.systemInstructions,
+      promptContextProvider: globalCfg.promptContextProvider,
       availableTools: globalCfg.availableTools,
       excludedTools: [...new Set([...(globalCfg.excludedTools ?? []), ...(c.excludedTools ?? [])])].length
         ? [...new Set([...(globalCfg.excludedTools ?? []), ...(c.excludedTools ?? [])])]
