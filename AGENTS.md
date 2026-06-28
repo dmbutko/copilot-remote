@@ -144,10 +144,8 @@ ls -t ~/.copilot/logs/process-*.log | head -1
 Often 50 MB+. Useful when SDK behaviour is surprising and bridge logs
 are quiet.
 
-**Live-host troubleshooting runbook**: when diagnosing the *running* bot,
-read `TROUBLESHOOTING.md` (gitignored, local to the host) — health-check
-commands, decision trees, a log-marker reference, and known not-a-bug causes
-so a fresh session can diagnose without resuming a prior one.
+**Live-host troubleshooting:** when diagnosing the *running* bot, read the local
+gitignored `TROUBLESHOOTING.md` if present (health-check commands + playbooks).
 
 ## Restart mechanism
 
