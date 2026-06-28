@@ -9,6 +9,12 @@
 > rediscovered plumbing. Copilot Memory expires after 28 days — record
 > long-lived facts here, not just in `store_memory`.*
 
+## Project scope
+
+Small personal deployment, not production. Prefer the simplest viable change:
+deletion over abstraction, no defense-in-depth or speculative generality unless
+clearly needed. When a fix and a refactor both solve it, ship the fix.
+
 ## Operating rules
 
 - `npm run build` IS the deploy. Writing `dist/index.js` triggers an
@@ -26,6 +32,10 @@
   build` deploys live, so scope creep ships before review. Process
   breach on 2026-06-01 (commit `3d12536`) was ratified one-time; future
   unapproved expansions must be reverted, not ratified.
+- **Diagnose before you patch.** When asked to investigate, explain, or plan,
+  produce findings only — don't edit or even scope a patch until explicitly told
+  to. Drive design decisions and post-patch review through the rubber-duck
+  agent; the user expects it in the loop, especially around code changes.
 - `~/.copilot-remote/config.json` contains the bot token and other
   secrets. **Never** `cat` the whole file in shared/log output —
   inspect specific keys only.
