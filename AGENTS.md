@@ -109,6 +109,31 @@ clearly needed. When a fix and a refactor both solve it, ship the fix.
 - `npm run build` IS the deploy (debounced ~70s → SIGUSR1 → systemd
   respawn). Never run without explicit user permission.
 
+## Dependency pinning — the CLI is a deliberate direct dep
+
+`@github/copilot` (the CLI) is a **direct** dependency on purpose — it is the
+lever that controls which CLI version the SDK actually runs. Do not treat it as
+"just a transitive of `@github/copilot-sdk`".
+
+- The SDK spawns the CLI with `--no-auto-update`, so the SDK-spawned subprocess
+  runs whatever `@github/copilot` npm resolved into `node_modules` **forever**
+  (it never shadow-updates like the TUI does). Whatever is pinned in
+  `package-lock.json` is what runs every turn.
+- When it was only a transitive (`@github/copilot-sdk@0.3.0` → `^1.0.36-0`) it
+  froze at 1.0.36, and a CLI-internal hardcoded model map (`KMe.gpt.high`)
+  silently routed rubber-duck / high-effort subagents to the wrong model
+  (gpt-5.4 instead of gpt-5.5). Fix was promoting it to a direct dep
+  (commit `efe9bf8`, `@github/copilot: ^1.0.48`), later `^1.0.60`.
+- **Upgrade footgun:** bumping the CLI can silently change model routing and
+  behaviour between patch versions. After ANY CLI bump, smoke-test model
+  routing (esp. subagents/rubber-duck) — see the May-18 incident.
+- Caret range is deliberate: allows patch/minor within 1.x but **excludes
+  prereleases** (`1.0.NN-M` are not picked by `npm update`/`@latest`).
+- `@github/copilot-sdk`'s own version is comparatively incidental (bump it only
+  for a specific SDK fix/feature); the SDK declares a CLI floor
+  (e.g. 1.0.5 needs `@github/copilot ^1.0.67`), so an SDK bump may force a CLI
+  bump too — re-smoke-test routing when it does.
+
 ## Known SDK 1.0 bugs to watch
 
 - **[#1562](https://github.com/github/copilot-sdk/issues/1562)** —
