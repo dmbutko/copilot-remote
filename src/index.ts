@@ -1738,6 +1738,29 @@ async function main(): Promise<void> {
         }
         break;
       }
+      case '/mcpreload': {
+        // Reconnect all MCP servers for this session — recovers a dead remote MCP
+        // session (e.g. github-mcp `invalid session`, which kills web_search) without
+        // a full process restart. See TROUBLESHOOTING.md / the 2026-07-15 incident.
+        const s = sessions.get(chatId);
+        if (!s?.alive) {
+          await client.sendMessage(chatId, '⚠️ No active session. Send a message first, then /mcpreload.');
+          break;
+        }
+        if (s.busy) {
+          await client.sendMessage(chatId, '⏳ A turn is in progress — wait for it to finish, then /mcpreload.');
+          break;
+        }
+        await client.sendMessage(chatId, '♻️ Reloading all MCP server connections for this session…');
+        try {
+          await s.reloadMcpServers();
+        } catch (e) {
+          await client.sendMessage(chatId, '❌ Reload failed: ' + (e instanceof Error ? e.message : String(e)));
+          break;
+        }
+        await client.sendMessage(chatId, '✅ MCP servers reloaded. Run a real search to confirm recovery.');
+        break;
+      }
       case '/mcp': {
         // Unified MCP view: merge runtime status (session.rpc.mcp.list) with
         // configured details (mcp-config.json, .vscode/mcp.json, .mcp.json).
@@ -2250,6 +2273,7 @@ async function main(): Promise<void> {
             '`/agent [name]` — Switch or list agents',
             '`/tools` — List available tools',
             '`/mcp` — MCP servers and runtime status',
+            '`/mcpreload` — Reconnect all MCP servers if tools stop working',
             '`/files` — Browse workspace files',
             '`/usage` — Token quota info',
             '',

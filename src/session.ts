@@ -1096,6 +1096,19 @@ export class Session extends EventEmitter {
     if (!this.session) return { servers: [] };
     return this.session.rpc.mcp.list();
   }
+  /**
+   * Reload (reconnect) ALL MCP server connections for this session. Recovers a dead
+   * remote MCP session (e.g. github-mcp `invalid session`) without a full process
+   * restart. Runs in the send queue so it can't interleave with an in-flight turn's
+   * tool calls; the alive/session check is atomic inside the queue.
+   */
+  reloadMcpServers(): ReturnType<SDKSession['rpc']['mcp']['reload']> {
+    return this.runInSendQueue(() => {
+      const session = this.session;
+      if (!this._alive || !session) throw new Error('Session not started');
+      return session.rpc.mcp.reload();
+    });
+  }
   async getQuota(): ReturnType<CopilotClient['rpc']['account']['getQuota']> {
     return this.client!.rpc.account.getQuota({});
   }

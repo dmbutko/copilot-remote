@@ -496,6 +496,7 @@ export class TelegramClient implements Client {
         { command: 'files', description: 'List workspace files' },
         { command: 'skills', description: 'List available skills' },
         { command: 'mcp', description: 'MCP server status' },
+        { command: 'mcpreload', description: 'Reconnect all MCP servers if tools stop working' },
       ]),
       10_000,
       'setMyCommands',

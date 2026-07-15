@@ -15,7 +15,7 @@ interface FakeSdkSession {
   emit: (event: { type: string; id?: string; [k: string]: unknown }) => void;
   send: (opts: Record<string, unknown>) => Promise<void>;
   sendAndWait: (opts: Record<string, unknown>, timeout: number) => Promise<unknown>;
-  rpc: { history: { truncate: (params: { eventId: string }) => Promise<{ eventsRemoved: number }> } };
+  rpc: { history: { truncate: (params: { eventId: string }) => Promise<{ eventsRemoved: number }> }; mcp: { reload: () => Promise<void> } };
 }
 
 function createTestSession() {
@@ -68,6 +68,9 @@ function createFakeSdkSession(
           return { eventsRemoved: 1 };
         },
       },
+      mcp: {
+        async reload() {},
+      },
     },
   };
 }
@@ -84,6 +87,39 @@ describe('Session', () => {
   it('rejects send before the session is started', async () => {
     const session = new Session();
     await assert.rejects(() => session.send('hello'), /Session not started/);
+  });
+
+  it('reloadMcpServers waits for an in-flight send, then reloads exactly once', async () => {
+    const session = createTestSession();
+    let releaseSend!: () => void;
+    const sendGate = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    let reloadCalls = 0;
+    const sdk = createFakeSdkSession(async () => {
+      await sendGate; // hold the send turn open so the queue is occupied
+      return { data: { content: 'ok' } };
+    });
+    sdk.rpc.mcp.reload = async () => {
+      reloadCalls++;
+    };
+    session.session = sdk;
+
+    const sendPromise = session.send('hello'); // occupies the send queue
+    const reloadPromise = session.reloadMcpServers(); // must queue behind the send
+
+    await new Promise((r) => realSetTimeout(r, 10));
+    assert.equal(reloadCalls, 0, 'reload must not run while a send holds the queue');
+
+    releaseSend();
+    await sendPromise;
+    await reloadPromise;
+    assert.equal(reloadCalls, 1, 'reload runs exactly once after the send completes');
+  });
+
+  it('reloadMcpServers rejects when the session is not started', async () => {
+    const session = new Session();
+    await assert.rejects(() => session.reloadMcpServers(), /Session not started/);
   });
 
   it('sendImmediate forwards mode=immediate and attachments to the SDK session', async () => {
