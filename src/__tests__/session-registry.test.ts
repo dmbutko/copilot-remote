@@ -160,4 +160,61 @@ describe('SessionRegistry race lock', () => {
     assert.equal(attempts, 2);
     assert.ok(s);
   });
+
+  it('archiveSession waits for kill() to resolve before renaming the session dir', async () => {
+    const chatId = 'chat-archive-1';
+    const sessionId = SessionStore.deterministicSessionId(chatId);
+
+    const { reg, sessions, tmpHome } = makeRegistry({
+      sessionFactory: () => {
+        throw new Error('sessionFactory should not be called in this test');
+      },
+    });
+    tmpToCleanup = tmpHome;
+
+    // On-disk session dir that archiveSession must move only AFTER kill() resolves.
+    const stateDir = path.join(tmpHome, '.copilot', 'session-state');
+    const sessionDir = path.join(stateDir, sessionId);
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.writeFileSync(path.join(sessionDir, 'events.jsonl'), '{"type":"session.start"}\n');
+
+    // Fake alive Session whose kill() only settles when we release the gate.
+    let releaseKill!: () => void;
+    const killGate = new Promise<void>((r) => {
+      releaseKill = r;
+    });
+    let killCalled = false;
+    let killResolved = false;
+    const fake = {
+      alive: true,
+      sessionId,
+      kill(): Promise<void> {
+        killCalled = true;
+        return killGate.then(() => {
+          killResolved = true;
+        });
+      },
+    } as unknown as Session;
+    sessions.set(chatId, fake);
+
+    // Begin archiving but do not await — kill() is gated.
+    const archivePromise = reg.archiveSession(chatId, sessionId);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.equal(killCalled, true, 'kill() should have been invoked');
+    assert.equal(killResolved, false, 'kill() should still be pending');
+    assert.ok(fs.existsSync(sessionDir), 'session dir must NOT be renamed while kill() is pending');
+
+    // Release kill(); the rename may now proceed.
+    releaseKill();
+    await archivePromise;
+
+    assert.equal(killResolved, true, 'kill() must resolve before archive completes');
+    assert.ok(!fs.existsSync(sessionDir), 'session dir should be moved after kill() resolves');
+    const archived = fs
+      .readdirSync(path.join(stateDir, '.archive'))
+      .filter((n) => n.startsWith(sessionId + '-'));
+    assert.equal(archived.length, 1, 'exactly one archived copy should exist');
+  });
 });

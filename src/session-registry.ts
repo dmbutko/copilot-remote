@@ -73,18 +73,26 @@ export class SessionRegistry {
     return promise;
   }
 
-  /** Kill in-memory Session but preserve disk state. Next message auto-resumes. */
-  suspendSession(chatId: string): void {
+  /**
+   * Remove a chat's Session from memory synchronously and begin its async
+   * teardown. Returns the in-flight `kill()` promise (or undefined when there is
+   * nothing alive to kill) so a caller that must not race the teardown — namely
+   * archiveSession, which renames the session dir — can await it. `kill()`'s
+   * `disconnect()` triggers the CLI's `session.shutdown` write; awaiting it
+   * before renaming keeps that write in the old dir instead of recreating the
+   * renamed-away path with a stray leading `session.shutdown` (the corruption
+   * that permanently broke resume). Fire-and-forget eviction callers ignore the
+   * return value via `suspendSession`.
+   */
+  private beginSuspend(chatId: string): Promise<void> | undefined {
     const s = this.sessions.get(chatId);
-    if (s?.alive) {
-      try {
-        s.kill();
-      } catch {
-        /* ignore */
-      }
-    }
     this.sessions.delete(chatId);
     log.info('[session:suspend]', chatId);
+    return s?.alive ? s.kill().catch(() => {}) : undefined;
+  }
+
+  suspendSession(chatId: string): void {
+    void this.beginSuspend(chatId);
   }
 
   /**
@@ -92,7 +100,7 @@ export class SessionRegistry {
    * next message creates fresh. Old data preserved for forensic/query access.
    */
   async archiveSession(chatId: string, explicitSessionId?: string): Promise<void> {
-    this.suspendSession(chatId);
+    await this.beginSuspend(chatId);
     const ids = [
       ...new Set([
         ...(explicitSessionId ? [explicitSessionId] : []),
