@@ -14,5 +14,6 @@ chat-sessions.json
 work-dirs.json
 copilot-remote.lock/
 copilot-remote.doc
+.playwright-mcp/
 TODO.md
 TROUBLESHOOTING.md
