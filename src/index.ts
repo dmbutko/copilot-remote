@@ -1316,6 +1316,9 @@ async function main(): Promise<void> {
         streamMsgId,
         final,
         responseMessageOpts,
+        // Edits are silent on Telegram; in steering mode the answer must arrive
+        // as a fresh (notifying) message below any mid-turn steer.
+        forceResend: c.messageMode === 'immediate',
       });
       if (finalization === 'edited') log.debug('[finalize] edited placeholder msgId:', streamMsgId);
       else if (finalization === 'resent') log.debug('[finalize] multi-chunk: delete + resend');

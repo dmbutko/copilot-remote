@@ -98,6 +98,25 @@ describe('finalizeStreamResponse', () => {
     ]);
   });
 
+  it('resends instead of editing when forceResend is set (steering mode)', async () => {
+    const { client, calls } = createClientSpy();
+
+    const result = await finalizeStreamResponse({
+      client,
+      chatId: 'chat-1',
+      streamMsgId: 42,
+      final: 'short final response',
+      responseMessageOpts: { replyTo: 7 },
+      forceResend: true,
+    });
+
+    assert.equal(result, 'resent');
+    assert.deepEqual(calls, [
+      { method: 'deleteMessage', args: ['chat-1', 42] },
+      { method: 'sendMessage', args: ['chat-1', 'short final response', { replyTo: 7 }] },
+    ]);
+  });
+
   it('sends a fresh final message when no streaming placeholder exists', async () => {
     const { client, calls } = createClientSpy();
 
