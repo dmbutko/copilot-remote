@@ -761,14 +761,15 @@ async function main(): Promise<void> {
     const progressDisplay = () => {
       const elapsedS = Math.round((performance.now() - turnStartedAt) / 1000);
       const elapsed = elapsedS < 60 ? `${elapsedS}s` : `${Math.floor(elapsedS / 60)}m${elapsedS % 60}s`;
-      // Elapsed leads the message: it changes every refresh, so Telegram never
-      // rejects the edit as "message is not modified", and a slow turn with no
-      // new tool events still visibly ticks instead of looking frozen.
-      const p: string[] = ['⏱ ' + elapsed];
+      const p: string[] = [];
       if (intentText) p.push('*' + intentText + '*');
       if (toolLines.length && showTools) p.push(toolLines.join('\n'));
       if (activeToolStatus) p.push('⏳ ' + activeToolStatus);
-      return p.join('\n\n');
+      // Elapsed leads the message: it changes every refresh, so Telegram never
+      // rejects the edit as "message is not modified", and a slow turn with no
+      // new tool events still visibly ticks instead of looking frozen. It has to
+      // lead because editMessageRaw truncates at 4096 chars.
+      return `⏱ ${elapsed}\n\n${p.join('\n\n') || '⏳ Working…'}`;
     };
 
     const sendPlaceholder = async () => {
@@ -785,7 +786,6 @@ async function main(): Promise<void> {
         streamMsgId = sentMsgId;
         if (streamMsgId !== null) {
           markTimeline('progress_visible', 'message');
-          lastProgressAt = Date.now();
           log.debug('Placeholder sent:', streamMsgId, 'for', chatId);
         }
       } finally {
