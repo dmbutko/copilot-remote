@@ -759,11 +759,16 @@ async function main(): Promise<void> {
     // Instead of streaming edits, we: send one placeholder, update status rarely, send final once.
 
     const progressDisplay = () => {
-      const p: string[] = [];
+      const elapsedS = Math.round((performance.now() - turnStartedAt) / 1000);
+      const elapsed = elapsedS < 60 ? `${elapsedS}s` : `${Math.floor(elapsedS / 60)}m${elapsedS % 60}s`;
+      // Elapsed leads the message: it changes every refresh, so Telegram never
+      // rejects the edit as "message is not modified", and a slow turn with no
+      // new tool events still visibly ticks instead of looking frozen.
+      const p: string[] = ['⏱ ' + elapsed];
       if (intentText) p.push('*' + intentText + '*');
       if (toolLines.length && showTools) p.push(toolLines.join('\n'));
       if (activeToolStatus) p.push('⏳ ' + activeToolStatus);
-      return p.join('\n\n') || '⏳ Working…';
+      return p.join('\n\n');
     };
 
     const sendPlaceholder = async () => {
@@ -888,10 +893,14 @@ async function main(): Promise<void> {
     }
     // Send placeholder immediately so user knows we're working
     await sendPlaceholder();
-    // Stop typing interval only if placeholder is visible
+    // Swap the typing pulse for a progress heartbeat: updateProgress() is
+    // otherwise only driven by tool/intent events, so a long quiet stretch
+    // leaves the placeholder untouched. It self-rate-limits to
+    // PROGRESS_INTERVAL_MS, and reusing this handle keeps the existing
+    // clearInterval sites as the only cleanup path.
     if (streamMsgId && typingInterval) {
       clearInterval(typingInterval);
-      typingInterval = null;
+      typingInterval = setInterval(() => void updateProgress(), 3000);
     }
     const turnReservation = session.reserveTurn();
 
