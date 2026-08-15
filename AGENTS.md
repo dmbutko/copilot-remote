@@ -134,6 +134,48 @@ lever that controls which CLI version the SDK actually runs. Do not treat it as
   (e.g. 1.0.5 needs `@github/copilot ^1.0.67`), so an SDK bump may force a CLI
   bump too — re-smoke-test routing when it does.
 
+### Upgrade runbook (learned the hard way, Aug-15 CLI 1.0.60 → 1.0.80)
+
+- **`config.json.copilotBinary` must point at the platform binary**, i.e.
+  `node_modules/@github/copilot-linux-x64/copilot`. The CLI npm package
+  **stopped shipping `index.js` at ~1.0.64** (runtime moved to the platform
+  package; the main package is just `npm-loader.js`). A plain `npm install`
+  with the old `@github/copilot/index.js` path makes the SDK throw
+  "Copilot CLI not found" and the bridge won't start. Change the path FIRST,
+  verify on the OLD version, and only then bump — that isolates a path
+  failure from a version failure.
+  Don't point it at `npm-loader.js`: it `spawnSync`s the native binary, so
+  the real CLI becomes a *grandchild* and can orphan on teardown. Don't unset
+  it either — `findBin()` falls back to `which copilot`, silently un-pinning
+  onto the global install. `--no-auto-update` still honours the npm pin with
+  the direct path (the bare binary self-resolves to a newer cached build
+  without it).
+- **Pair the SDK with the CLI; don't move one alone.** The historical thrash
+  (`a063805`, `ec6bb88`, `0cf1158`) was always a *pairing* mismatch, never the
+  version number, and it failed **silently** — permission RPC kind renames
+  surfaced as "tool not responding", and a missing attachment `displayName`
+  corrupted sessions on resume. Protocol-version negotiation only catches
+  gross mismatches; semantic drift inside one protocol version sails through.
+- **Rollback is not free.** CLI 1.0.80 writes `assistant.turn_start.data.model`,
+  which 1.0.60's schema rejects (`additionalProperties: false`) — sessions
+  touched by the new CLI are **unresumable if you downgrade**. Snapshot
+  `~/.copilot/session-state/` + `session-store.db` (use the SQLite backup API,
+  the CLI holds it open) before the first turn on a new CLI.
+- **Post-upgrade smoke test** (silent failures need active probing): permission
+  approve/reject with autopilot off; an attachment round-trip (checks
+  `displayName`); resume after a full restart; `/mcp` + `/mcpreload`; and a
+  grep sweep for `protocol version mismatch`, `Unhandled permission result`,
+  `Session file is corrupted`, `displayName: Required`, `Method not found`,
+  `tool not responding`.
+- **Deferred tools (the reason for this upgrade).** Above ~30 tools the CLI
+  marks the surplus `defer_loading: true` — the model gets the name but not
+  the definition, and must call `tool_search_tool_regex` to use them.
+  **CLI < 1.0.77 never told the model deferred tools existed**, so playwright
+  and scrapling were invisible and it silently fell back to `web_fetch` on
+  blocked pages. 1.0.77+ emits an explicit deferred-tools reminder. If tools
+  "exist but are never used", check for the reminder in the CLI log before
+  blaming prompts.
+
 ## Known SDK 1.0 bugs to watch
 
 - **[#1562](https://github.com/github/copilot-sdk/issues/1562)** —
