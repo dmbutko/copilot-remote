@@ -677,7 +677,12 @@ export class TelegramClient implements Client {
 
   /** Lightweight edit for streaming — sends plain text, skips markdown→HTML pipeline. */
   async editMessageRaw(chatId: string, msgId: number, text: string, timeoutMs?: number): Promise<void> {
-    const truncated = text.length > MAX_MESSAGE_LENGTH ? text.slice(0, MAX_MESSAGE_LENGTH - 4) + ' ...' : text;
+    const cut = text.slice(0, MAX_MESSAGE_LENGTH - 4);
+    // Never end on a lone high surrogate: slice() cuts UTF-16 code units, so a
+    // boundary inside an emoji leaves half a character and Telegram rejects the
+    // whole edit with "strings must be encoded in UTF-8".
+    const safe = /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
+    const truncated = text.length > MAX_MESSAGE_LENGTH ? safe + ' ...' : text;
     log.info(
       '[Telegram TX EDIT RAW]',
       `chat=${chatId}`,

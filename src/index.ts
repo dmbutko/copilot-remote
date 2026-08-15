@@ -36,7 +36,6 @@ import {
   extractAssistantPlan,
   formatSubagentStatus,
   formatToolStatus,
-  summarizeToolCompletionDetail,
 } from './status-summary.js';
 import { ToolStatusState } from './tool-status-state.js';
 import {
@@ -763,7 +762,7 @@ async function main(): Promise<void> {
       const elapsed = elapsedS < 60 ? `${elapsedS}s` : `${Math.floor(elapsedS / 60)}m${elapsedS % 60}s`;
       const p: string[] = [];
       if (intentText) p.push('*' + intentText + '*');
-      if (toolLines.length && showTools) p.push(toolLines.join('\n'));
+      if (toolLines.length && showTools) p.push(toolLines.slice(-5).join('\n'));
       if (activeToolStatus) p.push('⏳ ' + activeToolStatus);
       // Elapsed leads the message: it changes every refresh, so Telegram never
       // rejects the edit as "message is not modified", and a slow turn with no
@@ -982,7 +981,6 @@ async function main(): Promise<void> {
     };
     const toolStartTimes = new Map<string, number>();
     const toolLineIndexByCallId = new Map<string, number>();
-    const comparableText = (value: string) => value.replace(/[`*_]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
     const onAssistantPlan = (plan: AssistantPlanEvent) => {
       if (!ownsTurn(plan.turnId)) return;
       const summary = extractAssistantPlan(plan);
@@ -1087,11 +1085,7 @@ async function main(): Promise<void> {
       const elapsed = t.toolCallId ? toolStartTimes.get(t.toolCallId) : undefined;
       const duration = elapsed ? ` ${((Date.now() - elapsed) / 1000).toFixed(1)}s` : '';
       if (t.toolCallId) toolStartTimes.delete(t.toolCallId);
-      const completionDetail = summarizeToolCompletionDetail(t.detailedContent);
-      const shouldAppendCompletionDetail =
-        completionDetail && !comparableText(toolLines[targetIndex]).includes(comparableText(completionDetail));
-      toolLines[targetIndex] +=
-        (t.success !== false ? ' ✓' : ' ✗') + duration + (shouldAppendCompletionDetail ? ` — ${completionDetail}` : '');
+      toolLines[targetIndex] += (t.success !== false ? ' ✓' : ' ✗') + duration;
       if (t.toolCallId) toolLineIndexByCallId.delete(t.toolCallId);
 
       // Send any generated images as Telegram photos

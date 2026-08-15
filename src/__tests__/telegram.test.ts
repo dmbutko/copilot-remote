@@ -787,4 +787,25 @@ describe('sendButtons — callback_data 64-byte guard', () => {
     const guardWarnings = warnings.filter((w) => w.some((s) => s.includes('callback_data exceeds 64-byte limit')));
     assert.equal(guardWarnings.length, 0);
   });
+
+  it('editMessageRaw never truncates mid-surrogate-pair', async () => {
+    const client = new TelegramClient({
+      botToken: 'test-token',
+      allowedUsers: [],
+    });
+    const { calls } = await createTelegramHarness(client);
+
+    // Land an emoji exactly on the 4092-unit cut: slicing there would leave a
+    // lone high surrogate, which Telegram rejects with
+    // "Bad Request: strings must be encoded in UTF-8".
+    const text = 'a'.repeat(4091) + '🔧' + 'tail';
+    await client.editMessageRaw('123', 7, text);
+
+    const edit = calls.find((call) => call.method === 'editMessageText');
+    const sent = String(edit?.payload.text ?? '');
+    assert.ok(sent.length > 0);
+    const lastUnit = sent.charCodeAt(sent.length - 1);
+    assert.ok(!(lastUnit >= 0xd800 && lastUnit <= 0xdbff), 'must not end on a lone high surrogate');
+    assert.equal(Buffer.from(sent, 'utf8').toString('utf8'), sent, 'must round-trip as valid UTF-8');
+  });
 });
