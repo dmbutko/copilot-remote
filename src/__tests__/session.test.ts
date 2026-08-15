@@ -605,7 +605,7 @@ describe('Session', () => {
     });
 
     assert.deepEqual(clientOpts, {
-      connection: { kind: 'stdio', path: 'copilot', args: undefined },
+      connection: { kind: 'stdio', path: 'copilot', args: undefined, env: undefined },
       useLoggedInUser: false,
     });
   });
