@@ -36,6 +36,7 @@ import {
   extractAssistantPlan,
   formatSubagentStatus,
   formatToolStatus,
+  reasoningTail,
 } from './status-summary.js';
 import { ToolStatusState } from './tool-status-state.js';
 import {
@@ -727,9 +728,9 @@ async function main(): Promise<void> {
       : () => {};
     react(LIFECYCLE_REACTIONS.received);
     let streamMsgId: number | null = null;
-    let thinkingText = '',
-      responseText = '';
+    let responseText = '';
     let thinkingLogText = '';
+    let thinkingSeen = false;
     let intentText = '';
     const toolLines: string[] = [];
     let activeToolStatus = '';
@@ -762,6 +763,12 @@ async function main(): Promise<void> {
       const elapsed = elapsedS < 60 ? `${elapsedS}s` : `${Math.floor(elapsedS / 60)}m${elapsedS % 60}s`;
       const p: string[] = [];
       if (intentText) p.push('*' + intentText + '*');
+      // Only while there's no tool activity to show: once tools run, they are
+      // the better narrative and the bubble would otherwise get very tall.
+      if (showThinking && !toolLines.length) {
+        const thinking = reasoningTail(thinkingLogText);
+        if (thinking) p.push('🧠 ' + thinking);
+      }
       if (toolLines.length && showTools) p.push(toolLines.slice(-5).join('\n'));
       if (activeToolStatus) p.push('⏳ ' + activeToolStatus);
       // Elapsed leads the message: it changes every refresh, so Telegram never
@@ -965,8 +972,12 @@ async function main(): Promise<void> {
       noteFirstStreamEvent('thinking', text);
       thinkingLogText += text;
       logCopilotChunk('thinking', turnId, text);
-      if (!showThinking) return;
-      thinkingText += text;
+      // First reasoning of the turn: let the next heartbeat render it rather
+      // than waiting out the remaining rate-limit window.
+      if (showThinking && !thinkingSeen) {
+        thinkingSeen = true;
+        lastProgressAt = 0;
+      }
     };
 
     const onDelta = ({ turnId, text }: SessionStreamEvent) => {
@@ -974,9 +985,6 @@ async function main(): Promise<void> {
       if (firstDeltaAt === null) firstDeltaAt = performance.now();
       noteFirstStreamEvent('response', text);
       logCopilotChunk('response', turnId, text);
-      if (thinkingText) {
-        thinkingText = '';
-      }
       responseText += text;
     };
     const toolStartTimes = new Map<string, number>();
@@ -985,22 +993,12 @@ async function main(): Promise<void> {
       if (!ownsTurn(plan.turnId)) return;
       const summary = extractAssistantPlan(plan);
       if (summary.intentText && !intentText) intentText = summary.intentText;
-      if (summary.thinkingSummary && !responseText && showThinking) {
-        thinkingText = summary.thinkingSummary;
-      }
       if (summary.activeToolStatus && !activeToolStatus) {
         activeToolStatus = summary.activeToolStatus;
       }
       if (summary.intentText || summary.activeToolStatus) {
         void updateProgress();
       }
-    };
-    const onThinkSummary = ({ turnId, text }: SessionStreamEvent) => {
-      if (!ownsTurn(turnId)) return;
-      if (!showThinking || responseText) return;
-      const summary = text.trim();
-      if (!summary) return;
-      thinkingText = summary;
     };
     const onToolStart = (t: ToolEvent & { turnId?: string | null }) => {
       if (!ownsTurn(t.turnId)) return;
@@ -1151,7 +1149,6 @@ async function main(): Promise<void> {
     };
 
     session.on('assistant_plan', onAssistantPlan);
-    session.on('thinking_summary', onThinkSummary);
     session.on('thinking_event', onThink);
     session.on('delta_event', onDelta);
     session.on('turn_start', onTurnStart);
@@ -1165,7 +1162,6 @@ async function main(): Promise<void> {
 
     const cleanup = () => {
       session.off('assistant_plan', onAssistantPlan);
-      session.off('thinking_summary', onThinkSummary);
       session.off('thinking_event', onThink);
       session.off('delta_event', onDelta);
       session.off('turn_start', onTurnStart);

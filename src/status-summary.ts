@@ -32,7 +32,11 @@ function getString(value: unknown): string | undefined {
 function clip(text: string, max = 120): string {
   const normalized = text.replace(/\s+/g, ' ').trim();
   if (!normalized) return '';
-  return normalized.length > max ? normalized.slice(0, max) + '…' : normalized;
+  if (normalized.length <= max) return normalized;
+  // Drop a dangling high surrogate: slicing UTF-16 code units can split an
+  // emoji, and Telegram rejects the whole message as invalid UTF-8.
+  const head = normalized.slice(0, max).replace(/[\uD800-\uDBFF]$/, '');
+  return head + '…';
 }
 
 function toInlineCode(text: string, max = 80): string {
@@ -169,4 +173,18 @@ export function summarizeToolCompletionDetail(detail: string | undefined, max = 
     return 'Fetched content';
   }
   return clip(normalized, max);
+}
+
+/**
+ * Tail of streamed reasoning, bounded for the progress bubble. Sliced from the
+ * end so it tracks current activity, never starting on a lone low surrogate
+ * (invalid UTF-8 would make Telegram reject the whole message).
+ */
+export function reasoningTail(text: string, max = 200): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  if (normalized.length <= max) return normalized;
+  let tail = normalized.slice(-max);
+  if (/^[\uDC00-\uDFFF]/.test(tail)) tail = tail.slice(1);
+  return '…' + tail;
 }
