@@ -9,7 +9,6 @@ interface AssistantPlanToolRequestLike {
 
 export interface AssistantPlanSummary {
   intentText?: string;
-  thinkingSummary?: string;
   activeToolStatus?: string;
 }
 
@@ -42,14 +41,6 @@ function clip(text: string, max = 120): string {
 function toInlineCode(text: string, max = 80): string {
   const safe = clip(text.replace(/`/g, ''), max);
   return safe ? `\`${safe}\`` : '';
-}
-
-function summarizeReasoning(value: string, max = 220): string {
-  const [firstParagraph] = value
-    .split(/\n\s*\n/)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-  return clip(firstParagraph ?? value, max);
 }
 
 function humanizeAgentName(value: string): string {
@@ -136,12 +127,9 @@ export function extractAssistantPlan(input: {
   const intentRequest = toolRequests.find((toolRequest) => toolRequest.name === 'report_intent');
   const actionableRequest = toolRequests.find((toolRequest) => toolRequest.name !== 'report_intent');
   const intentText = getString(intentRequest?.arguments?.intent) ?? getString(intentRequest?.arguments?.message);
-  const reasoningSummary =
-    getString(input.reasoningText) ?? (toolRequests.length ? getString(input.content) : undefined);
 
   return {
     intentText,
-    thinkingSummary: reasoningSummary ? summarizeReasoning(reasoningSummary) : undefined,
     activeToolStatus: actionableRequest
       ? formatToolStatus(actionableRequest.name, actionableRequest.arguments).statusLine
       : undefined,
@@ -160,19 +148,6 @@ export function formatSubagentStatus(input: {
   return {
     statusLine: `🤖 Starting ${clip(displayName, 72)}`,
   };
-}
-
-export function summarizeToolCompletionDetail(detail: string | undefined, max = 120): string | undefined {
-  const normalized = getString(detail);
-  if (!normalized) return undefined;
-  if (/^Intent logged$/i.test(normalized)) return undefined;
-  if (
-    /^Content type .*?cannot be simplified to markdown\./i.test(normalized) ||
-    /^Contents of https?:\/\//i.test(normalized)
-  ) {
-    return 'Fetched content';
-  }
-  return clip(normalized, max);
 }
 
 /**
