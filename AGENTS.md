@@ -322,6 +322,42 @@ surface.
   `~/.vscode/mcp.json` → CLI built-ins. Use `/mcp` in Telegram to
   inspect runtime state.
 
+### Upgrading scrapling (browser fetchers break silently)
+
+`scrapling` is a pipx install (`scrapling[all]`, `~/.local/bin/scrapling`)
+exposed to the bot as an MCP server. Upgrading it drags playwright and
+patchright along, and **their browser binaries are not upgraded with them** —
+scraping then fails at fetch time, not install time:
+
+```
+BrowserType.launch_persistent_context: Executable doesn't exist at
+  ~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome
+```
+
+- **`scrapling install` does NOT fix this.** It reports *"The dependencies are
+  already installed"* — it only checks that browsers exist, never that the
+  revision matches the installed playwright. Run the real thing instead:
+  ```sh
+  pipx upgrade scrapling
+  ~/.local/pipx/venvs/scrapling/bin/python -m playwright install \
+      chromium chromium-headless-shell        # ~115 MB
+  ```
+- **Static fetching keeps working**, so a quick `scrapling extract get` smoke
+  test passes while both browser fetchers are dead. Test with `fetch` and
+  `stealthy-fetch`, and prove JS actually rendered — `get` vs `fetch` on
+  `https://quotes.toscrape.com/js/` returns 0 chars vs ~935 chars.
+- **Never prune `~/.cache/ms-playwright` by "latest revision wins", and don't
+  run `playwright uninstall --unused`.** playwright and patchright pin
+  *different* chromium revisions (Aug-17: playwright 1.62.0 → 1234,
+  patchright 1.61.2 → **1228**), and `--unused` is evaluated per-package, so it
+  will happily delete the build the other one needs. `chromium-1234` serves
+  `DynamicFetcher`/`fetch`; `chromium-1228` serves `StealthyFetcher`/
+  `stealthy-fetch`. The `mcp-chrome-*` dirs belong to the node
+  `@playwright/mcp` server, which is separately pointed at system
+  `/usr/bin/chromium` via `--executable-path`.
+- The bot holds the scrapling MCP server as a child process, so it keeps
+  running the pre-upgrade code until `/restart`.
+
 ## Network gotchas
 
 - The bot has historically wedged on IPv6. The systemd unit sets
