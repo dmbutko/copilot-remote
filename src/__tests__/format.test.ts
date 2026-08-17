@@ -141,6 +141,46 @@ describe('markdownToTelegramChunks', () => {
     }
   });
 
+  it('never splits a surrogate pair, including through HTML expansion re-split', () => {
+    // Third instance of this bug class this month (editMessageRaw and clip() were
+    // the first two). A boundary landing between the high and low surrogate of an
+    // emoji leaves a half-character, which encodes to invalid UTF-8 and makes
+    // Telegram reject the ENTIRE message with HTTP 400.
+    // Bold + link force HTML expansion, so the secondary splitter in
+    // format/telegram.ts computes its own boundary on top of chunkText's.
+    const emoji = '\u{1F600}';
+    const md = `**${emoji.repeat(30)}** [${emoji.repeat(30)}](https://example.com)`;
+    const plainNoWs = emoji.repeat(60);
+    for (const limit of [11, 25, 41, 63]) {
+      const chunks = markdownToTelegramChunks(md, limit);
+      for (const c of chunks) {
+        assert.doesNotMatch(c.text, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/, `limit ${limit}: unpaired high surrogate`);
+        assert.doesNotMatch(c.text, /(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, `limit ${limit}: unpaired low surrogate`);
+        assert.doesNotMatch(c.html, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/, `limit ${limit}: unpaired surrogate in html`);
+        assert.equal(Buffer.from(c.text, 'utf-8').toString('utf-8'), c.text, `limit ${limit}: not UTF-8 round-trippable`);
+      }
+      assert.equal(
+        chunks.map((c) => c.text).join('').replace(/\s/g, ''),
+        plainNoWs,
+        `limit ${limit}: content lost or duplicated`,
+      );
+      assert.ok(chunks.some((c) => c.html.includes('<b>')), `limit ${limit}: bold formatting lost`);
+      assert.ok(chunks.some((c) => c.html.includes('<a href')), `limit ${limit}: link formatting lost`);
+    }
+  });
+
+  it('emits individually valid chunks when a surrogate pair cannot fit the limit', () => {
+    // Guard against an infinite loop: limit 1 can never hold a 2-unit pair, so
+    // the boundary must move forward rather than back.
+    const chunks = markdownToTelegramChunks('\u{1F600}\u{1F600}\u{1F600}', 1);
+    assert.ok(chunks.length > 0);
+    for (const c of chunks) {
+      assert.doesNotMatch(c.text, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/, 'unpaired high surrogate');
+      assert.doesNotMatch(c.text, /(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, 'unpaired low surrogate');
+    }
+    assert.equal(chunks.map((c) => c.text).join(''), '\u{1F600}\u{1F600}\u{1F600}');
+  });
+
   it('does not produce tiny orphan chunks when HTML barely exceeds limit', () => {
     // Regression for the Salzburg bug: a 4254-char paragraph with inline **bold** rendered to
     // ~4143-char HTML (47 over the 4096 limit). The old dispatcher used proportional math that

@@ -21,6 +21,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 import { log } from './log.js';
+import { splitEnvelope } from './inbound-envelope.js';
 import type { RemoteProviderConfig } from './provider-config.js';
 import type { MCPServerConfig } from './mcp-config.js';
 import { createTelegramTools } from './tools.js';
@@ -525,7 +526,13 @@ export class Session extends EventEmitter {
                 maxBuffer: provider.maxBytes ?? 65536,
               });
               const ctx = stdout.trim();
-              if (ctx) return { modifiedPrompt: `${ctx}\n\n${input.prompt}` };
+              // Context goes AFTER the `<sender>` envelope. Prepending it blindly
+              // pushed the envelope off line 1 and the actor parsed as `unknown`
+              // (live 2026-06-24 `07815e0` → 2026-08-17).
+              if (ctx) {
+                const { envelope, body } = splitEnvelope(input.prompt);
+                return { modifiedPrompt: `${envelope}${ctx}\n\n${body}` };
+              }
             } catch (e) {
               // fail-open: inject nothing. Log so silent failures (timeout, non-zero
               // exit, oversize stdout > maxBuffer) are observable in the bridge journal.
@@ -566,7 +573,6 @@ export class Session extends EventEmitter {
       '[SDK event]',
       ...formatLogFields({ seq: this.sdkEventSeq, sinceLastEventMs, ...summarizeSdkEvent(e.type, eventData) }),
     );
-    log.debug(`[SDK event] ${e.type}:`, JSON.stringify(e.data ?? {}));
     switch (e.type) {
       case 'assistant.message_delta': {
         const text = e.data.deltaContent;

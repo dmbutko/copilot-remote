@@ -610,6 +610,34 @@ describe('Session', () => {
     });
   });
 
+  it('promptContextProvider inserts context AFTER the <sender> envelope', async () => {
+    // Regression: the hook prepended provider stdout blindly
+    // (`${ctx}\n\n${prompt}`), pushing <sender> off line 1 so the actor parsed
+    // as `unknown`. Live 2026-06-24 (07815e0) → 2026-08-17.
+    // `/bin/echo` is invoked with the session id as argv, so stdout == sessionId.
+    const session = new Session() as any;
+    session.cwd = '/tmp/project';
+
+    const config = session.buildConfig({
+      cwd: '/tmp/project',
+      promptContextProvider: { command: '/bin/echo', timeoutMs: 5000 },
+    });
+
+    const result = await config.hooks.onUserPromptSubmitted(
+      { prompt: '<sender>880903035</sender>\nSelling watch on fb' },
+      { sessionId: 'INJECTED-CONTEXT' },
+    );
+
+    assert.equal(
+      result.modifiedPrompt,
+      '<sender>880903035</sender>\nINJECTED-CONTEXT\n\nSelling watch on fb',
+    );
+    assert.ok(
+      result.modifiedPrompt.startsWith('<sender>880903035</sender>\n'),
+      'envelope must remain on line 1 or the actor parses as unknown',
+    );
+  });
+
   it('includes a custom sessionId in the SDK session config', () => {
     const session = new Session() as any;
     session.cwd = '/tmp/project';

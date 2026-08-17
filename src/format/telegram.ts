@@ -272,6 +272,14 @@ function splitMarkdownIRPreserveWhitespace(ir: MarkdownIR, limit: number): Markd
       }
     }
     if (end <= cursor) end = hardEnd;
+    // Never cut between a surrogate pair: the half-character encodes to invalid
+    // UTF-8 and Telegram rejects the whole message with HTTP 400. This boundary
+    // is computed independently of chunkText's, after HTML expansion.
+    const hi = ir.text.charCodeAt(end - 1);
+    const lo = ir.text.charCodeAt(end);
+    if (hi >= 0xd800 && hi <= 0xdbff && lo >= 0xdc00 && lo <= 0xdfff) {
+      end = end - 1 > cursor ? end - 1 : end + 1;
+    }
     chunks.push({
       text: ir.text.slice(cursor, end),
       styles: sliceStyleSpansLocal(ir.styles, cursor, end),
