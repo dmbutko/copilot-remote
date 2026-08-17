@@ -771,11 +771,18 @@ async function main(): Promise<void> {
       }
       if (toolLines.length && showTools) p.push(toolLines.slice(-5).join('\n'));
       if (activeToolStatus) p.push('⏳ ' + activeToolStatus);
-      // Elapsed leads the message: it changes every refresh, so Telegram never
-      // rejects the edit as "message is not modified", and a slow turn with no
-      // new tool events still visibly ticks instead of looking frozen. It has to
-      // lead because editMessageRaw truncates at 4096 chars.
-      return `⏱ ${elapsed}\n\n${p.join('\n\n') || '⏳ Working…'}`;
+      // Elapsed trails as a footer, and the body is bounded here so
+      // editMessageRaw's 4096 truncation can never reach it: tool partial
+      // output is unbounded, and losing the footer would take the timer with
+      // it — leaving consecutive renders identical, which Telegram rejects as
+      // "message is not modified". Clipped surrogate-safe so a cut inside an
+      // emoji can't emit invalid UTF-8.
+      const MAX_BODY = 3800;
+      let body = p.join('\n\n') || '⏳ Working…';
+      if (body.length > MAX_BODY) {
+        body = body.slice(0, MAX_BODY).replace(/[\uD800-\uDBFF]$/, '') + '…';
+      }
+      return `${body}\n\n⏱ ${elapsed}`;
     };
 
     const sendPlaceholder = async () => {
