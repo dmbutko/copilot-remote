@@ -488,7 +488,7 @@ export class TelegramClient implements Client {
         { command: 'usage', description: 'Usage & token stats' },
         { command: 'research', description: 'Deep research a topic' },
         { command: 'cd', description: 'Change working directory' },
-        { command: 'abort', description: 'Cancel current operation' },
+        { command: 'abort', description: 'Stop current turn, keep session' },
         { command: 'compact', description: 'Compress context window' },
         { command: 'plan', description: 'View/manage plan' },
         { command: 'diff', description: 'Review uncommitted changes' },

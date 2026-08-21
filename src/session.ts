@@ -637,6 +637,15 @@ export class Session extends EventEmitter {
         if (this.activeTurnId === e.data.turnId) this.activeTurnId = null;
         this.emit('turn_end', { turnId: e.data.turnId });
         break;
+      // An aborted turn terminates with `abort`, NOT `assistant.turn_end`. Without this
+      // case `busy` stays true forever and every later message is swallowed as steering.
+      // Only the root agent's abort ends the turn; sub-agent aborts carry an agentId.
+      case 'abort':
+        if (!e.agentId) {
+          this._turnActive = false;
+          this.activeTurnId = null;
+        }
+        break;
       case 'session.usage_info':
         this.emit('context_info', {
           tokenLimit: e.data.tokenLimit,
@@ -697,6 +706,13 @@ export class Session extends EventEmitter {
         break;
       case 'session.idle':
         log.info('[SDK idle]', JSON.stringify(e.data));
+        // A cancelled loop can be reported here without a preceding root `abort`, and it
+        // is just as terminal — clear busy or immediate-mode messages keep being
+        // swallowed as steering for a turn that already ended.
+        if (!e.agentId && e.data?.aborted) {
+          this._turnActive = false;
+          this.activeTurnId = null;
+        }
         this.emit('idle');
         break;
       case 'session.title_changed':
@@ -803,6 +819,7 @@ export class Session extends EventEmitter {
         // capture the follow-up interaction's final message. See captureBackgroundFollowups.
         const bg = {
           sawActivity: false,
+          aborted: false,
           completions: 0,
           idles: 0,
           turnStarts: 0,
@@ -832,7 +849,18 @@ export class Session extends EventEmitter {
             case 'assistant.turn_start':
               if (!ev.agentId) {
                 bg.turnStarts += 1;
+                // A newly started root turn is live again; don't let a previous turn's
+                // abort suppress this one's synthesis.
+                bg.aborted = false;
                 if (bg.capturing && !bg.followupId) bg.followupId = ev.data.interactionId ?? null;
+                wakeBg();
+              }
+              break;
+            case 'abort':
+              // Root abort ends this send's agentic work: no follow-up interaction will
+              // ever start, so wake any in-flight wait instead of stalling the send queue.
+              if (!ev.agentId) {
+                bg.aborted = true;
                 wakeBg();
               }
               break;
@@ -847,6 +875,7 @@ export class Session extends EventEmitter {
               // Only the root agent's idle matters; sub-agent idles carry an agentId.
               if (!ev.agentId) {
                 bg.idles += 1;
+                if (ev.data?.aborted) bg.aborted = true;
                 wakeBg();
               }
               break;
@@ -900,7 +929,10 @@ export class Session extends EventEmitter {
         // If a background agent ran this turn, the real answer may be produced in a
         // post-idle follow-up interaction. Wait for and prefer that synthesis; if none
         // is captured, prefer the SDK's final result over a bare "hang tight" placeholder.
-        if (bg.sawActivity) {
+        // Skip when the turn was aborted: the follow-up interactions it waits for will
+        // never start, so it would hold the send queue for up to turnTimeoutMs and delay
+        // the user's next message.
+        if (bg.sawActivity && !bg.aborted) {
           const followup = await this.captureBackgroundFollowups(bg, turnStartedAtMs);
           if (followup) {
             content = followup;
@@ -949,6 +981,7 @@ export class Session extends EventEmitter {
    */
   private async captureBackgroundFollowups(
     bg: {
+      aborted: boolean;
       completions: number;
       idles: number;
       turnStarts: number;
@@ -966,16 +999,19 @@ export class Session extends EventEmitter {
 
     const waitUntil = (pred: () => boolean, timeoutMs: number): Promise<boolean> =>
       new Promise<boolean>((resolve) => {
-        if (pred()) {
-          resolve(true);
+        // Treat an abort as terminal: the awaited follow-up can never arrive, and holding
+        // the wait would keep the send queue closed against the user's next message.
+        const done = () => pred() || bg.aborted;
+        if (done()) {
+          resolve(pred());
           return;
         }
         let timer: ReturnType<typeof setTimeout> | null = null;
         const check = () => {
-          if (pred()) {
+          if (done()) {
             if (timer) clearTimeout(timer);
             bg.wake = null;
-            resolve(true);
+            resolve(pred());
           } else {
             bg.wake = check; // re-arm for the next event
           }
@@ -994,7 +1030,7 @@ export class Session extends EventEmitter {
 
     // Loop while background agents keep completing; bounded by the notification grace
     // (gives up when no further completion arrives) and the overall turn cap.
-    while (Date.now() - turnStartedAtMs < OVERALL_CAP_MS) {
+    while (!bg.aborted && Date.now() - turnStartedAtMs < OVERALL_CAP_MS) {
       const gotCompletion = await waitUntil(() => bg.completions > completionsConsumed, NOTIFICATION_GRACE_MS);
       if (!gotCompletion) break;
       completionsConsumed += 1;
@@ -1046,8 +1082,17 @@ export class Session extends EventEmitter {
   deny() {
     this.emit('permission_response', false);
   }
-  async abort() {
-    this.session?.abort();
+  /**
+   * Cancels the running turn and its sub-agents; the session and history stay valid.
+   * Returns false when the runtime declined the abort — the SDK's `session.abort()`
+   * helper discards the RPC result, so a soft `{success:false}` would otherwise look
+   * like success and leave the turn running (the 2026-08-21 wedge).
+   */
+  async abort(): Promise<boolean> {
+    if (!this.session) throw new Error('Session not started');
+    const result = await this.session.rpc.abort({ reason: 'user_initiated' });
+    if (result.error) throw new Error(result.error);
+    return result.success;
   }
 
   // ── SDK RPCs ──

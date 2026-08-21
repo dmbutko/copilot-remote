@@ -71,6 +71,25 @@ clearly needed. When a fix and a refactor both solve it, ship the fix.
   file-intake tests. Looking at the transport alone is how the
   May-27 `/config` regression shipped (commit `3ea8cc1` → fix
   `2970645`).
+- **Aborting a turn (don't regress this — it caused a 2 h outage).**
+  `sendAndWait`'s timeout only stops *waiting*; it does **not** abort
+  in-flight agent work (`copilot-sdk/dist/session.d.ts:149`). So the
+  post-delta timeout path must call `session.abort()` itself, otherwise
+  the turn keeps running with its stream listeners already detached —
+  burning credits, relaying nothing, holding `busy` true.
+  An aborted turn terminates with a root **`abort`** event, NOT
+  `assistant.turn_end`, so `handleEvent` has a `case 'abort'` that clears
+  `_turnActive`/`activeTurnId` for the root agent only (sub-agent aborts
+  carry an `agentId`). Without it `busy` is never cleared and, under
+  `messageMode: "immediate"`, every later message is silently swallowed as
+  steering for a turn that never ends (2026-08-21 incident).
+  `session.abort()` is **not destructive** — it cancels the turn and its
+  sub-agents but leaves the session and history valid
+  (`session.d.ts:271-290`). `/abort` must therefore never archive; `/new`
+  is the discard command. A root abort also sets `_turnAborted`, which
+  suppresses `captureBackgroundFollowups()` for that send — it would
+  otherwise wait for follow-ups that can never start and hold the send
+  queue for up to `turnTimeoutMs`.
 - **SDK RPC pattern (1.0+):** `session.rpc.X.Y()` and `client.rpc.X.Y()`
   are typed public getters. Don't wrap in `as unknown as { rpc: ... }`
   casts — that pattern is dead. For wrapper method return types, use
@@ -188,11 +207,6 @@ lever that controls which CLI version the SDK actually runs. Do not treat it as
   `/start <dir>` (archives + creates fresh); after 3 consecutive
   resume failures → automatic archive → next message creates fresh.
   Pending upstream fix. Workaround: rebuild to force resume.
-- **`AbortEvent` unhandled** in `handleEvent` switch
-  (`src/session.ts`). SDK emits it on turn-abort but bridge has no
-  case. The `toolNameByCallId` map is already covered by lifecycle
-  clears (`disconnect`, `kill`, `newSession`), so this is purely
-  "could add the case for completeness." Low priority.
 - **`toolName: 'unknown'` fallback** in `tool_complete` triggers if
   SDK ever emits `tool.execution_complete` before the matching
   `tool.execution_start` (race). SDK contract says this shouldn't

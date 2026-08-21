@@ -1237,14 +1237,31 @@ async function main(): Promise<void> {
       }
 
       // Kill the broken session so it doesn't linger
-      // EXCEPTION: a turn-timeout AFTER first delta means the agent was actively producing events
-      // and is just doing slow work. The SDK's sendAndWait timeout does NOT abort the agent itself
-      // (per @github/copilot-sdk docs). Preserve the session so the user doesn't lose context.
+      // EXCEPTION: a turn-timeout AFTER first delta means the agent was actively producing
+      // events and is just doing slow work, so we keep the session (SDK abort leaves it valid
+      // and the conversation intact). But we MUST abort the turn: `sendAndWait`'s timeout only
+      // stops waiting, it does not abort in-flight agent work, and this handler's stream
+      // listeners are torn down below — so an un-aborted turn keeps running and burning
+      // credits with nothing relaying it, holding `busy` true and swallowing every later
+      // message as steering. That wedged the bot for 2h on 2026-08-21.
       const isPostDeltaTimeout = isTimeout && !hadNoCopilotEvents;
       const isSessionNotFound = errMsg.includes('Session not found');
+      let abortFailed = false;
       if (!isPostDeltaTimeout) {
         // Suspend: kill in-memory but preserve disk for resume on next message.
         suspendSession(chatId);
+      } else {
+        try {
+          const stopped = await session.abort();
+          if (!stopped) throw new Error('runtime declined abort');
+        } catch (e) {
+          // Abort didn't land, so the turn may still be running and `busy` may still be
+          // true. Suspending drops the in-memory session (disk history is kept) — without
+          // it we'd be back in the zombie state this fix exists to prevent.
+          abortFailed = true;
+          log.warn('[prompt:timeout-abort-failed]', `req=${promptTraceId}`, String(e));
+          suspendSession(chatId);
+        }
       }
 
       // Auto-retry on "Session not found": the session was evicted from CLI memory
@@ -1300,7 +1317,9 @@ async function main(): Promise<void> {
       const userMsg = errMsg.includes('STREAM_DESTROYED')
         ? '💀 Lost connection to Copilot. Send a message to reconnect.'
         : isPostDeltaTimeout
-          ? `⏱️ Turn exceeded ${timeoutMins} min — your session is preserved (the agent may still be working). Send another message to continue, or /abort to cancel.`
+          ? abortFailed
+            ? `⏱️ Turn exceeded ${timeoutMins} min. Stop could not be confirmed, so the session was disconnected — your history is preserved. Send another message to resume.`
+            : `⏱️ Turn exceeded ${timeoutMins} min and was stopped. Your session and history are intact — send another message to continue.`
           : errMsg.includes('timeout')
             ? '⏱️ Request timed out. Send a message to try again.'
             : isSessionNotFound
@@ -1849,22 +1868,23 @@ async function main(): Promise<void> {
         break;
       }
       case '/abort': {
+        // SDK abort cancels the running turn and its spawned sub-agents while leaving the
+        // session valid and the conversation intact. Use /new to start fresh instead.
         const s = sessions.get(chatId);
         if (s?.alive) {
           try {
-            // Try steering first — tell the agent to stop
-            await s.sendImmediate('STOP. The user has aborted this task. Do not continue. Acknowledge the abort.');
-            await client.sendMessage(chatId, '🛑 Abort sent. Waiting for agent to stop...');
-            // Give it 5s to comply, then hard kill + archive
-            setTimeout(() => {
-              if (s.alive) {
-                archiveSession(chatId, s.sessionId ?? undefined).catch(() => {});
-                client.sendMessage(chatId, "💀 Hard killed — agent didn't stop. Session archived.").catch(() => {});
-              }
-            }, 5000);
-          } catch {
-            await archiveSession(chatId, s.sessionId ?? undefined);
-            await client.sendMessage(chatId, '🛑 Session killed and archived.');
+            const stopped = await s.abort();
+            if (!stopped) throw new Error('runtime declined abort');
+            await client.sendMessage(chatId, '🛑 Turn stopped. Session and history are intact.');
+          } catch (e) {
+            // Same reasoning as the timeout path: an unconfirmed abort may leave the turn
+            // running and `busy` stuck, so drop the in-memory session (disk history kept).
+            suspendSession(chatId);
+            log.warn('[abort:failed]', `chat=${chatId}`, String(e));
+            await client.sendMessage(
+              chatId,
+              '⚠️ Stop could not be confirmed — session disconnected, history preserved. Send a message to resume.',
+            );
           }
         } else {
           await client.sendMessage(chatId, '⚪ No active session.');
@@ -2265,7 +2285,7 @@ async function main(): Promise<void> {
             '`/status` — Model, mode, cwd, quota',
             '`/sessionid [session-id]` — Export a copy-friendly session id',
             '`/compact` — Compress context window',
-            '`/abort` — Cancel current request',
+            '`/abort` — Stop the current turn (session & history kept)',
             '',
             '*🧠 Modes*',
             '`/plan [task]` — Toggle plan mode or plan a task',

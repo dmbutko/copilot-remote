@@ -638,6 +638,83 @@ describe('Session', () => {
     );
   });
 
+  it('root abort clears busy; sub-agent abort does not', () => {
+    // An aborted turn terminates with `abort`, NOT `assistant.turn_end`. Before this was
+    // handled, `busy` stayed true forever and (in immediate mode) every later message was
+    // swallowed as steering for a turn that never ended — the 2026-08-21 2h wedge.
+    const session = new Session() as any;
+
+    session.handleEvent({ type: 'assistant.turn_start', data: { turnId: 'a1' } } as any);
+    assert.equal(session.busy, true, 'turn_start should mark the session busy');
+
+    // Sub-agent aborts carry an agentId and must NOT end the root turn.
+    session.handleEvent({ type: 'abort', agentId: 'sub-7', data: { reason: 'user_initiated' } } as any);
+    assert.equal(session.busy, true, 'sub-agent abort must not clear the root turn');
+
+    // Root abort has no agentId.
+    session.handleEvent({ type: 'abort', data: { reason: 'user_initiated' } } as any);
+    assert.equal(session.busy, false, 'root abort must clear busy');
+    assert.equal(session.activeTurnId, null, 'root abort must clear the active turn id');
+  });
+
+  it('aborted root idle also clears busy (no preceding abort event)', () => {
+    // The CLI can report a cancelled loop via session.idle{aborted:true} without a root
+    // `abort` first. That is equally terminal — if busy stays true, immediate-mode
+    // messages keep being swallowed as steering for a turn that already ended.
+    const session = new Session() as any;
+    session.handleEvent({ type: 'assistant.turn_start', data: { turnId: 'a1' } } as any);
+
+    session.handleEvent({ type: 'session.idle', agentId: 'sub-3', data: { aborted: true } } as any);
+    assert.equal(session.busy, true, 'sub-agent idle must not clear the root turn');
+
+    session.handleEvent({ type: 'session.idle', data: { aborted: true } } as any);
+    assert.equal(session.busy, false, 'aborted root idle must clear busy');
+  });
+
+  it('abort() surfaces a soft RPC refusal instead of reporting success', async () => {
+    // The SDK helper `session.abort()` discards the RPC result, so {success:false}
+    // looked like success and left the turn running. We call the typed RPC directly.
+    const session = new Session() as any;
+
+    session.session = { rpc: { abort: async () => ({ success: true }) } };
+    assert.equal(await session.abort(), true, 'clean abort reports true');
+
+    session.session = { rpc: { abort: async () => ({ success: false }) } };
+    assert.equal(await session.abort(), false, 'declined abort must not report success');
+
+    session.session = { rpc: { abort: async () => ({ success: false, error: 'runtime refused' }) } };
+    await assert.rejects(() => session.abort(), /runtime refused/, 'error must propagate');
+  });
+
+  it('abort during background-followup capture releases the wait immediately', async () => {
+    // Regression: waits of 8s/180s (capped by turnTimeoutMs) held the send queue after an
+    // abort, so /abort confirmed "stopped" while the next message still queued behind it.
+    const session = new Session() as any;
+    const bg = {
+      aborted: false,
+      completions: 1,
+      idles: 0,
+      turnStarts: 0,
+      capturing: false,
+      followupId: null,
+      followupContent: '',
+      wake: null as (() => void) | null,
+    };
+
+    const started = Date.now();
+    const pending = session.captureBackgroundFollowups(bg, Date.now());
+    // Abort mid-wait, exactly as the raw SDK listener does on a root abort.
+    setTimeout(() => {
+      bg.aborted = true;
+      bg.wake?.();
+    }, 20);
+
+    const result = await pending;
+    const elapsed = Date.now() - started;
+    assert.equal(result, null, 'no synthesis is produced for an aborted turn');
+    assert.ok(elapsed < 2000, `capture must exit promptly on abort, took ${elapsed}ms`);
+  });
+
   it('includes a custom sessionId in the SDK session config', () => {
     const session = new Session() as any;
     session.cwd = '/tmp/project';
