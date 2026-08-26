@@ -638,37 +638,36 @@ describe('Session', () => {
     );
   });
 
-  it('root abort clears busy; sub-agent abort does not', () => {
-    // An aborted turn terminates with `abort`, NOT `assistant.turn_end`. Before this was
-    // handled, `busy` stayed true forever and (in immediate mode) every later message was
-    // swallowed as steering for a turn that never ended — the 2026-08-21 2h wedge.
+  it('root session.idle clears busy regardless of payload; sub-agent idle does not', () => {
+    // Trace-shaped, from real production events. Reason-specific abort signals are
+    // PATH-DEPENDENT and cannot be relied on:
+    //   24-Aug timeout abort -> `abort` events, then session.idle {"aborted":true}
+    //   26-Aug manual /abort -> NO abort event, then a bare session.idle {}
+    // Gating the busy-clear on those left _turnActive stuck true for 22 min, and the
+    // next message was silently swallowed as steering into a turn that had ended.
+    // Root idle is the one terminal signal both paths share.
     const session = new Session() as any;
 
     session.handleEvent({ type: 'assistant.turn_start', data: { turnId: 'a1' } } as any);
-    assert.equal(session.busy, true, 'turn_start should mark the session busy');
+    assert.equal(session.busy, true, 'turn_start marks the session busy');
 
-    // Sub-agent aborts carry an agentId and must NOT end the root turn.
-    session.handleEvent({ type: 'abort', agentId: 'sub-7', data: { reason: 'user_initiated' } } as any);
-    assert.equal(session.busy, true, 'sub-agent abort must not clear the root turn');
-
-    // Root abort has no agentId.
-    session.handleEvent({ type: 'abort', data: { reason: 'user_initiated' } } as any);
-    assert.equal(session.busy, false, 'root abort must clear busy');
-    assert.equal(session.activeTurnId, null, 'root abort must clear the active turn id');
-  });
-
-  it('aborted root idle also clears busy (no preceding abort event)', () => {
-    // The CLI can report a cancelled loop via session.idle{aborted:true} without a root
-    // `abort` first. That is equally terminal — if busy stays true, immediate-mode
-    // messages keep being swallowed as steering for a turn that already ended.
-    const session = new Session() as any;
-    session.handleEvent({ type: 'assistant.turn_start', data: { turnId: 'a1' } } as any);
-
-    session.handleEvent({ type: 'session.idle', agentId: 'sub-3', data: { aborted: true } } as any);
+    // Sub-agent idles carry an agentId and must not end the root turn.
+    session.handleEvent({ type: 'session.idle', agentId: 'sub-3', data: {} } as any);
     assert.equal(session.busy, true, 'sub-agent idle must not clear the root turn');
 
+    // The exact payload production sent after /abort: bare {}.
+    session.handleEvent({ type: 'session.idle', data: {} } as any);
+    assert.equal(session.busy, false, 'bare root idle must clear busy');
+    assert.equal(session.activeTurnId, null, 'bare root idle must clear the active turn id');
+  });
+
+  it('root session.idle with aborted:true also clears busy (timeout-abort trace)', () => {
+    // The other observed shape (24-Aug). Same postcondition, different payload.
+    const session = new Session() as any;
+    session.handleEvent({ type: 'assistant.turn_start', data: { turnId: 'a1' } } as any);
     session.handleEvent({ type: 'session.idle', data: { aborted: true } } as any);
     assert.equal(session.busy, false, 'aborted root idle must clear busy');
+    assert.equal(session.activeTurnId, null);
   });
 
   it('abort() surfaces a soft RPC refusal instead of reporting success', async () => {

@@ -77,19 +77,22 @@ clearly needed. When a fix and a refactor both solve it, ship the fix.
   post-delta timeout path must call `session.abort()` itself, otherwise
   the turn keeps running with its stream listeners already detached —
   burning credits, relaying nothing, holding `busy` true.
-  An aborted turn terminates with a root **`abort`** event, NOT
-  `assistant.turn_end`, so `handleEvent` has a `case 'abort'` that clears
-  `_turnActive`/`activeTurnId` for the root agent only (sub-agent aborts
-  carry an `agentId`). Without it `busy` is never cleared and, under
-  `messageMode: "immediate"`, every later message is silently swallowed as
-  steering for a turn that never ends (2026-08-21 incident).
+  An aborted turn does **not** reliably emit any abort-specific signal, so
+  `handleEvent` clears `_turnActive`/`activeTurnId` on **any root
+  `session.idle`** (`!agentId`; ignore sub-agent idles). Don't re-gate that
+  on `abort` events or `data.aborted` — manual `/abort` emits no `abort`
+  event and a bare `{}`, which left `busy` stuck true and silently swallowed
+  the next message as steering (2026-08-26). Verify lifecycle assumptions
+  against a real `[SDK idle]` log line, not the typings.
   `session.abort()` is **not destructive** — it cancels the turn and its
   sub-agents but leaves the session and history valid
   (`session.d.ts:271-290`). `/abort` must therefore never archive; `/new`
-  is the discard command. A root abort also sets `_turnAborted`, which
-  suppresses `captureBackgroundFollowups()` for that send — it would
-  otherwise wait for follow-ups that can never start and hold the send
-  queue for up to `turnTimeoutMs`.
+  is the discard command.
+- **The progress heartbeat also refreshes typing, every 4s.** Typing renders
+  in the chat header, so it is the only indicator that survives the agent
+  sending media (ten photos once buried the progress bubble). 3s would eat
+  the group throttler's whole 20-call/min reservoir; 5s risks expiry
+  flicker. Clear the interval on every handler exit.
 - **SDK RPC pattern (1.0+):** `session.rpc.X.Y()` and `client.rpc.X.Y()`
   are typed public getters. Don't wrap in `as unknown as { rpc: ... }`
   casts — that pattern is dead. For wrapper method return types, use

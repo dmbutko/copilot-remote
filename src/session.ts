@@ -637,15 +637,6 @@ export class Session extends EventEmitter {
         if (this.activeTurnId === e.data.turnId) this.activeTurnId = null;
         this.emit('turn_end', { turnId: e.data.turnId });
         break;
-      // An aborted turn terminates with `abort`, NOT `assistant.turn_end`. Without this
-      // case `busy` stays true forever and every later message is swallowed as steering.
-      // Only the root agent's abort ends the turn; sub-agent aborts carry an agentId.
-      case 'abort':
-        if (!e.agentId) {
-          this._turnActive = false;
-          this.activeTurnId = null;
-        }
-        break;
       case 'session.usage_info':
         this.emit('context_info', {
           tokenLimit: e.data.tokenLimit,
@@ -706,10 +697,12 @@ export class Session extends EventEmitter {
         break;
       case 'session.idle':
         log.info('[SDK idle]', JSON.stringify(e.data));
-        // A cancelled loop can be reported here without a preceding root `abort`, and it
-        // is just as terminal — clear busy or immediate-mode messages keep being
-        // swallowed as steering for a turn that already ended.
-        if (!e.agentId && e.data?.aborted) {
+        // Root idle is the ONE reliable terminal signal: no root turn is running, so
+        // nothing is steerable. Reason-specific signals are path-dependent and cannot be
+        // relied on — a 24-Aug timeout abort emitted `abort` + idle{aborted:true}, while a
+        // 26-Aug manual /abort emitted no `abort` event and a bare idle `{}`. Gating on
+        // those left `busy` stuck true and silently swallowed the next message as steering.
+        if (!e.agentId) {
           this._turnActive = false;
           this.activeTurnId = null;
         }

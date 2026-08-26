@@ -704,17 +704,14 @@ async function main(): Promise<void> {
       );
     };
     const responseMessageOpts: MessageOptions = { disableLinkPreview: true, replyTo: msgId };
-    let typingFails = 0;
-    const MAX_TYPING_FAILS = 3;
     const sendTypingSafe = () => {
-      if (typingFails >= MAX_TYPING_FAILS) return;
-      client.sendTyping(chatId).catch(() => {
-        typingFails++;
-      });
+      // Rejections are swallowed: a transient failure must not disable the indicator
+      // for the rest of a long turn.
+      client.sendTyping(chatId).catch(() => {});
     };
     // Show typing immediately — session creation can take seconds
     sendTypingSafe();
-    let typingInterval: ReturnType<typeof setInterval> | null = setInterval(() => sendTypingSafe(), 3000);
+    let typingInterval: ReturnType<typeof setInterval> | null = setInterval(() => sendTypingSafe(), 4000);
     const c = cfg(chatId);
     const showThinking = c.showThinking;
     const showTools = c.showTools;
@@ -906,14 +903,19 @@ async function main(): Promise<void> {
     }
     // Send placeholder immediately so user knows we're working
     await sendPlaceholder();
-    // Swap the typing pulse for a progress heartbeat: updateProgress() is
-    // otherwise only driven by tool/intent events, so a long quiet stretch
-    // leaves the placeholder untouched. It self-rate-limits to
-    // PROGRESS_INTERVAL_MS, and reusing this handle keeps the existing
-    // clearInterval sites as the only cleanup path.
+    // One heartbeat for both jobs: keep the typing indicator alive AND tick the progress
+    // bubble. Typing renders in the chat header, so it is the only indicator that cannot
+    // be buried when the agent sends media (26-Aug: ten photos pushed the bubble out of
+    // view and the user had no sign a 21-min turn was running). 4s, not 3s — the group
+    // throttler allows 20 calls/min total and every chat_id call counts, so a 3s pulse
+    // would eat the whole budget; 4s still beats Telegram's ~5s typing expiry.
+    // updateProgress() self-rate-limits to PROGRESS_INTERVAL_MS.
     if (streamMsgId && typingInterval) {
       clearInterval(typingInterval);
-      typingInterval = setInterval(() => void updateProgress(), 3000);
+      typingInterval = setInterval(() => {
+        sendTypingSafe();
+        void updateProgress();
+      }, 4000);
     }
     const turnReservation = session.reserveTurn();
 
