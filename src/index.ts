@@ -389,14 +389,6 @@ async function main(): Promise<void> {
     };
   }
 
-  if (client.sendPhoto) {
-    const origSendPhoto = client.sendPhoto.bind(client);
-    client.sendPhoto = (key: string, fileOrUrl: string | Buffer, caption?: string) => {
-      const [cid, tid] = resolveKey(key);
-      return origSendPhoto(cid, fileOrUrl, caption, tid);
-    };
-  }
-
   const workDir = (id: string) => workDirs.get(id) ?? config.workDir;
 
   // SessionRegistry (owns sessions/workDirs lifecycle: getSession with race-lock,
@@ -1094,14 +1086,6 @@ async function main(): Promise<void> {
       if (t.toolCallId) toolStartTimes.delete(t.toolCallId);
       toolLines[targetIndex] += (t.success !== false ? ' ✓' : ' ✗') + duration;
       if (t.toolCallId) toolLineIndexByCallId.delete(t.toolCallId);
-
-      // Send any generated images as Telegram photos
-      if (t.images?.length && client.sendPhoto) {
-        for (const base64 of t.images) {
-          const buffer = Buffer.from(base64, 'base64');
-          client.sendPhoto(chatId, buffer).catch(() => {});
-        }
-      }
     };
     const onPerm = async (req: PermissionRequest & { turnId?: string | null }) => {
       if (!ownsTurn(req.turnId)) return;

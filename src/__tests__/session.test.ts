@@ -376,7 +376,7 @@ describe('Session', () => {
     assert.deepEqual(seen, [{ toolName: 'bash', arguments: { command: 'ls' } }]);
   });
 
-  it('maps tool.execution_complete events and extracts image payloads', () => {
+  it('maps tool.execution_complete events to tool_complete', () => {
     const session = new Session() as any;
     let toolEvent: Record<string, unknown> | undefined;
 
@@ -387,9 +387,13 @@ describe('Session', () => {
     // Register the tool name via execution_start so execution_complete can look it up
     session.handleEvent({
       type: 'tool.execution_start',
-      data: { toolCallId: 'call-1', toolName: 'generate_image', arguments: {} },
+      data: { toolCallId: 'call-1', toolName: 'view', arguments: {} },
     } as any);
 
+    // `contents` may carry inline image blocks. They are deliberately NOT forwarded to
+    // Telegram — they are the model's own inputs (e.g. scrapling-screenshot), and
+    // auto-publishing them spammed the chat with 10 photos on 2026-08-26. Delivery to
+    // the user requires an explicit Telegram media tool (send_photo / send_file).
     session.handleEvent({
       type: 'tool.execution_complete',
       data: {
@@ -398,11 +402,7 @@ describe('Session', () => {
         result: {
           content: 'done',
           detailedContent: 'done',
-          contents: [
-            { type: 'image', data: 'base64-image-1', mimeType: 'image/png' },
-            { type: 'text', text: 'ignored' },
-            { type: 'image', data: 'base64-image-2', mimeType: 'image/png' },
-          ],
+          contents: [{ type: 'image', data: 'base64-image-1', mimeType: 'image/png' }],
         },
       },
     } as any);
@@ -410,10 +410,9 @@ describe('Session', () => {
     assert.deepEqual(toolEvent, {
       turnId: null,
       toolCallId: 'call-1',
-      toolName: 'generate_image',
+      toolName: 'view',
       success: true,
       detailedContent: 'done',
-      images: ['base64-image-1', 'base64-image-2'],
     });
   });
 

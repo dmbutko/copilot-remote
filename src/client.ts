@@ -40,7 +40,6 @@ export interface Client {
   // File operations (optional)
   getFileUrl?(fileId: string): Promise<string | null>;
   sendDocument?(chatId: string, url: string, filename: string, caption?: string): Promise<number | null>;
-  sendPhoto?(chatId: string, fileOrUrl: string | Buffer, caption?: string, threadId?: number): Promise<number | null>;
 
   // Message actions (optional)
   pinMessage?(chatId: string, messageId: number): Promise<void>;

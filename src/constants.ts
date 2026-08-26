@@ -9,7 +9,6 @@ export interface ToolEvent {
   arguments?: Record<string, string>;
   success?: boolean;
   detailedContent?: string;
-  images?: string[];
 }
 
 /** User input request from the agent */

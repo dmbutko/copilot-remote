@@ -858,28 +858,6 @@ export class TelegramClient implements Client {
     }
   }
 
-  async sendPhoto(
-    chatId: string,
-    fileOrUrl: string | Buffer,
-    caption?: string,
-    threadId?: number,
-  ): Promise<number | null> {
-    try {
-      const source = Buffer.isBuffer(fileOrUrl)
-        ? new InputFile(fileOrUrl, 'image.png')
-        : fileOrUrl.startsWith('/')
-          ? new InputFile(fileOrUrl)
-          : fileOrUrl;
-      const res = await this.bot.api.sendPhoto(chatId, source, {
-        ...(caption ? { caption } : {}),
-        ...(threadId ? { message_thread_id: threadId } : {}),
-      });
-      return res.message_id;
-    } catch {
-      return null;
-    }
-  }
-
   // ── Message actions ──
 
   async pinMessage(chatId: string, messageId: number): Promise<void> {

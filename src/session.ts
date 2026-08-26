@@ -666,19 +666,12 @@ export class Session extends EventEmitter {
         const toolName =
           this.toolNameByCallId.get(callId) ?? e.data.toolDescription?.name ?? 'unknown';
         this.toolNameByCallId.delete(callId);
-        // Image blocks live under `result.contents` (typed content block array).
-        // The string `result.content` summary stays as detailedContent fallback.
-        const imageBlocks: string[] = [];
-        for (const block of e.data.result?.contents ?? []) {
-          if (block.type === 'image' && block.data) imageBlocks.push(block.data);
-        }
         this.emit('tool_complete', {
           turnId: this.activeTurnId,
           toolCallId: callId,
           toolName,
           success: e.data.success,
           detailedContent: e.data.result?.detailedContent ?? e.data.result?.content,
-          images: imageBlocks.length ? imageBlocks : undefined,
         });
         break;
       }
