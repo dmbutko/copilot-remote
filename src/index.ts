@@ -540,11 +540,6 @@ async function main(): Promise<void> {
       },
     );
 
-    session.on('hook:error', async (info: { error?: unknown; message?: string }) => {
-      const msg =
-        info.message ?? (info.error instanceof Error ? info.error.message : String(info.error ?? 'Unknown error'));
-      await client.sendMessage(chatId, `⚠️ *SDK Error:* ${msg}`);
-    });
     session.on('hook:session_start', () => log.debug('[hook] Session started for chat', chatId));
     session.on('hook:session_end', () => log.debug('[hook] Session ended for chat', chatId));
   }

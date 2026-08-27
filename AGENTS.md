@@ -229,6 +229,32 @@ Key log markers: `[Telegram RX]`, `[prompt:start|done]`, `[SDK event]`,
 file log at `logs/copilot-remote.log` is empty — the journal is the
 truth.
 
+**`[Telegram RX]` only covers typed text.** Button taps arrive as
+`callback_query` and log through a different path (`src/telegram.ts:327-336`
+vs `:419-437`), so they never produce an `[Telegram RX]` line. Counting
+feature usage by grepping that marker will under-report anything reachable
+by an inline keyboard — it once "proved" the `/config` submenus were dead
+when they are the most-used feature in the bridge. Also note the journal
+contains the assistant's own conversation text, so grepping it for error
+strings yields false positives; prefer structured journal markers
+(`[SDK event] type="..."`) or the persisted
+`~/.copilot/session-state/*/events.jsonl` — but note some events are
+**ephemeral and never persisted** (`model.call_failure` is one), so the
+journal is sometimes the only record.
+
+- **Never surface `onErrorOccurred` to the user.** CLI 1.0.80 fires it only for
+  *recoverable* model-call errors — `errorContext:'model_call'` and
+  `recoverable:true` are hardcoded at
+  `@github/copilot-linux-x64/app.js:2416` — and it **discards the hook's return
+  value**, so `errorHandling`/`retryCount`/`userNotification` are inert and the
+  retry is CLI-native. The bridge used to relay this as
+  `⚠️ SDK Error: [object Object]` (the runtime emits `{name,message,stack}`
+  while the SDK's type declares `error: string`). Deleted 2026-08-27: the alert
+  fired *mid-turn*, provoked a reply while `busy=true`, and that reply hit the
+  `sendImmediate` steering path — ✅ reaction, no answer, no `[prompt:done]`.
+  Terminal failures already reach Telegram via `session.error` →
+  `emit('error')` → `❌`.
+
 **CLI server process** — raw SDK internals, telemetry, MCP I/O:
 
 ```sh

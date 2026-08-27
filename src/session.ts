@@ -492,16 +492,12 @@ export class Session extends EventEmitter {
         onPostToolUse: async (input: { toolName?: string; result?: unknown }) => {
           this.emit('hook:post_tool', { toolName: input.toolName, result: input.result });
         },
-        onErrorOccurred: async (input: {
-          error?: unknown;
-          message?: string;
-          errorContext?: string;
-          recoverable?: boolean;
-        }) => {
-          this.emit('hook:error', { error: input.error, message: input.message });
-          // Auto-retry model call errors
+        onErrorOccurred: async (input: { errorContext?: string; recoverable?: boolean }) => {
+          // Deliberately no user-facing notification — see AGENTS.md. CLI 1.0.80
+          // discards this hook's return value (app.js:2416), so the retry below is
+          // inert; the real retry is CLI-native.
           if (input.errorContext === 'model_call') {
-            return { errorHandling: 'retry' as const, retryCount: 3, userNotification: 'Model error — retrying...' };
+            return { errorHandling: 'retry' as const, retryCount: 3 };
           }
           // Skip recoverable tool errors
           if (input.errorContext === 'tool_execution' && input.recoverable) {
