@@ -527,7 +527,7 @@ export class Session extends EventEmitter {
                 '[promptContextProvider]',
                 `session=${invocation.sessionId}`,
                 `result=${ctx ? 'loaded' : 'empty'}`,
-                `bytes=${ctx.length}`,
+                `bytes=${Buffer.byteLength(ctx)}`,
                 `ms=${Date.now() - startedAt}`,
               );
               if (ctx) return { additionalContext: `${preamble}\n\n${ctx}` };
