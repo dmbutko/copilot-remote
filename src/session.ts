@@ -21,7 +21,6 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 import { log } from './log.js';
-import { splitEnvelope } from './inbound-envelope.js';
 import type { RemoteProviderConfig } from './provider-config.js';
 import type { MCPServerConfig } from './mcp-config.js';
 import { createTelegramTools } from './tools.js';
@@ -475,13 +474,74 @@ export class Session extends EventEmitter {
         onSessionStart: async (_input: unknown, invocation: { sessionId: string }) => {
           this.emit('hook:session_start');
           // Inject runtime context as additional instructions
-          return {
-            additionalContext: [
-              'You are running via copilot-remote on Telegram.',
-              'Use your custom Telegram tools (send_file, send_photo, send_location, send_voice, pin_message, create_topic, react, send_contact, create_poll) when appropriate.',
-              `Session ID: ${invocation.sessionId}`,
-            ].join(' '),
-          };
+          const preamble = [
+            'You are running via copilot-remote on Telegram.',
+            'Use your custom Telegram tools (send_file, send_photo, send_location, send_voice, pin_message, create_topic, react, send_contact, create_poll) when appropriate.',
+            `Session ID: ${invocation.sessionId}`,
+          ].join(' ');
+          // Scoped context provider (see GlobalConfig.promptContextProvider) —
+          // runs ONCE per session start/resume, not per prompt.
+          //
+          // WHY HERE AND NOT onUserPromptSubmitted: context returned from *this*
+          // hook is prepended by the CLI as a hidden request message that is NOT
+          // persisted as a normal `user.message`, so it is rebuilt on each connect
+          // and cannot pile up. The previous per-prompt path used modifiedPrompt,
+          // which DOES land in `user.message` — permanent conversation history —
+          // and appended a fresh full copy every time the provider's output
+          // changed. One 3.5-month session accumulated 16 copies (~276KB / ~69k
+          // tokens) of near-duplicate context, which measurably degrades recall of
+          // the *current* version (arxiv 2603.12271, 2307.03172).
+          //
+          // NOTE the inverse asymmetry that forced the old design: the host CLI
+          // silently DROPS additionalContext from onUserPromptSubmitted (verified
+          // through CLI 1.0.64) but honours it here — canary-verified on 1.0.81.
+          // Do not "simplify" this back to the prompt hook.
+          //
+          // Provider contract is versioned: argv is [sessionId, 'session-start-v1'].
+          // The extra arg tells the provider we get exactly one shot per connection
+          // so it must not self-suppress "unchanged" output. Older providers ignore
+          // it, so bridge and provider can deploy in either order and roll back
+          // safely.
+          //
+          // invocation.sessionId is the deterministic `telegram-<chatId>` id the
+          // provider maps to an actor (see SessionStore.deterministicSessionId).
+          // Fail-open: any error / timeout / non-zero exit / empty output ⇒ no
+          // extra context. Never block session start.
+          const provider = opts.promptContextProvider;
+          if (provider?.command) {
+            const startedAt = Date.now();
+            try {
+              const { stdout } = await execFileAsync(
+                provider.command,
+                [invocation.sessionId, 'session-start-v1'],
+                {
+                  timeout: provider.timeoutMs ?? 2000,
+                  maxBuffer: provider.maxBytes ?? 65536,
+                },
+              );
+              const ctx = stdout.trim();
+              // Positive telemetry: an empty-but-successful run is the silent
+              // failure mode (unmapped chat, self-suppressing provider), so log
+              // the outcome either way. Never log the context itself.
+              log.info(
+                '[promptContextProvider]',
+                `session=${invocation.sessionId}`,
+                `result=${ctx ? 'loaded' : 'empty'}`,
+                `bytes=${ctx.length}`,
+                `ms=${Date.now() - startedAt}`,
+              );
+              if (ctx) return { additionalContext: `${preamble}\n\n${ctx}` };
+            } catch (e) {
+              log.warn(
+                '[promptContextProvider]',
+                `session=${invocation.sessionId}`,
+                'result=failed',
+                `ms=${Date.now() - startedAt}`,
+                (e as Error)?.message ?? e,
+              );
+            }
+          }
+          return { additionalContext: preamble };
         },
         onSessionEnd: async () => {
           this.emit('hook:session_end');
@@ -505,36 +565,12 @@ export class Session extends EventEmitter {
           }
           return undefined;
         },
-        onUserPromptSubmitted: async (input: { prompt?: string }, invocation: { sessionId: string }) => {
+        onUserPromptSubmitted: async (input: { prompt?: string }) => {
           this.emit('hook:user_prompt', { prompt: input.prompt });
-          // Optional per-prompt context provider (see GlobalConfig.promptContextProvider).
-          // Generic + config-driven: the bridge runs the configured command with the
-          // session id as argv and PREPENDS its stdout to the prompt. Fail-open: any error /
-          // timeout / non-zero exit / empty output ⇒ no context (never blocks the turn).
-          // NOTE: uses modifiedPrompt, NOT additionalContext — the host CLI parses but never
-          // injects a userPromptSubmitted hook's additionalContext (verified through CLI 1.0.64);
-          // only modifiedPrompt is consumed for this hook. Do not "simplify" back.
-          const provider = opts.promptContextProvider;
-          if (provider?.command && input.prompt) {
-            try {
-              const { stdout } = await execFileAsync(provider.command, [invocation.sessionId], {
-                timeout: provider.timeoutMs ?? 2000,
-                maxBuffer: provider.maxBytes ?? 65536,
-              });
-              const ctx = stdout.trim();
-              // Context goes AFTER the `<sender>` envelope. Prepending it blindly
-              // pushed the envelope off line 1 and the actor parsed as `unknown`
-              // (live 2026-06-24 `07815e0` → 2026-08-17).
-              if (ctx) {
-                const { envelope, body } = splitEnvelope(input.prompt);
-                return { modifiedPrompt: `${envelope}${ctx}\n\n${body}` };
-              }
-            } catch (e) {
-              // fail-open: inject nothing. Log so silent failures (timeout, non-zero
-              // exit, oversize stdout > maxBuffer) are observable in the bridge journal.
-              log.debug('[promptContextProvider] failed; no context injected:', (e as Error)?.message ?? e);
-            }
-          }
+          // Context injection moved to onSessionStart (see comment there): doing it
+          // per-prompt via modifiedPrompt wrote a fresh copy into `user.message`
+          // history every time the provider output changed, accumulating 16 copies
+          // in one long-lived session. Nothing to do here now.
           return undefined;
         },
       },

@@ -609,10 +609,13 @@ describe('Session', () => {
     });
   });
 
-  it('promptContextProvider inserts context AFTER the <sender> envelope', async () => {
-    // Regression: the hook prepended provider stdout blindly
-    // (`${ctx}\n\n${prompt}`), pushing <sender> off line 1 so the actor parsed
-    // as `unknown`. Live 2026-06-24 (07815e0) → 2026-08-17.
+  it('context provider runs at session start, not per prompt', async () => {
+    // Moved 2026-08-29 from onUserPromptSubmitted. That hook used modifiedPrompt
+    // (its additionalContext is silently dropped by the host CLI), which wrote a
+    // fresh copy into `user.message` history on every change — one long-lived
+    // session accumulated 16 copies / ~69k tokens. onSessionStart's
+    // additionalContext lands in the system slot instead, which is rebuilt on
+    // every connect and cannot accumulate.
     // `/bin/echo` is invoked with the session id as argv, so stdout == sessionId.
     const session = new Session() as any;
     session.cwd = '/tmp/project';
@@ -622,18 +625,49 @@ describe('Session', () => {
       promptContextProvider: { command: '/bin/echo', timeoutMs: 5000 },
     });
 
-    const result = await config.hooks.onUserPromptSubmitted(
+    const started = await config.hooks.onSessionStart({}, { sessionId: 'INJECTED-CONTEXT' });
+    assert.ok(
+      started.additionalContext.includes('INJECTED-CONTEXT'),
+      'provider stdout must reach session-start additionalContext',
+    );
+    assert.ok(
+      started.additionalContext.startsWith('You are running via copilot-remote'),
+      'runtime preamble must survive',
+    );
+    // Versioned contract: the provider is told this is a once-per-connection
+    // call so it must not self-suppress unchanged output. `/bin/echo` returns
+    // its argv, so the mode arg is visible in the output.
+    assert.ok(
+      started.additionalContext.includes('session-start-v1'),
+      'provider must be invoked with the session-start mode arg',
+    );
+
+    // The prompt hook must no longer touch the prompt at all.
+    const perPrompt = await config.hooks.onUserPromptSubmitted(
       { prompt: '<sender>880903035</sender>\nSelling watch on fb' },
       { sessionId: 'INJECTED-CONTEXT' },
     );
+    assert.equal(perPrompt, undefined, 'prompt hook must not inject or rewrite the prompt');
+  });
 
-    assert.equal(
-      result.modifiedPrompt,
-      '<sender>880903035</sender>\nINJECTED-CONTEXT\n\nSelling watch on fb',
+  it('session start is fail-open when the context provider fails', async () => {
+    // A broken/slow provider must never block or break session start.
+    const session = new Session() as any;
+    session.cwd = '/tmp/project';
+
+    const config = session.buildConfig({
+      cwd: '/tmp/project',
+      promptContextProvider: { command: '/nonexistent-provider-xyz', timeoutMs: 500 },
+    });
+
+    const started = await config.hooks.onSessionStart({}, { sessionId: 'telegram-1' });
+    assert.ok(
+      started.additionalContext.startsWith('You are running via copilot-remote'),
+      'preamble must still be returned when the provider throws',
     );
     assert.ok(
-      result.modifiedPrompt.startsWith('<sender>880903035</sender>\n'),
-      'envelope must remain on line 1 or the actor parses as unknown',
+      started.additionalContext.includes('Session ID: telegram-1'),
+      'session id must still be present',
     );
   });
 
