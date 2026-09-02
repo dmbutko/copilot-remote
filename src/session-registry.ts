@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Session, type SessionOptions } from './session.js';
+import { ModelUnavailableError, Session, type SessionOptions } from './session.js';
 import { SessionStore } from './store.js';
 import { log } from './log.js';
 import type { RestartManager } from './restart-manager.js';
@@ -145,6 +145,13 @@ export class SessionRegistry {
         log.info('Resumed session', saved.sessionId, 'for', chatId);
         return s;
       } catch (e) {
+        // A bad configured model is an operator error, not session corruption.
+        // Surface it without touching the resume-failure counter, so a typo or
+        // a newly retired model id can never archive a healthy conversation.
+        if (e instanceof ModelUnavailableError) {
+          log.error('[session:resume] Configured model unavailable — session preserved:', e.message);
+          throw e;
+        }
         log.warn('Resume failed for', saved.sessionId, '— trying next candidate/new session:', e);
         const failures = this.recordResumeFailure(chatId);
         if (failures >= RESUME_FAILURE_LIMIT) {

@@ -26,6 +26,23 @@ import type { MCPServerConfig } from './mcp-config.js';
 import { createTelegramTools } from './tools.js';
 import { formatLogFields, summarizeSdkEvent } from './transport-log.js';
 
+/**
+ * Thrown when the configured model cannot be applied to a resumed session.
+ * Distinct from a resume-load failure so the registry does not treat a bad
+ * model id as session corruption and archive a healthy conversation.
+ */
+export class ModelUnavailableError extends Error {
+  constructor(
+    readonly model: string,
+    readonly cause: unknown,
+  ) {
+    super(
+      `Configured model "${model}" could not be applied: ${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+    this.name = 'ModelUnavailableError';
+  }
+}
+
 /** Reasoning effort levels supported by the SDK */
 type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
 
@@ -1238,6 +1255,28 @@ export class Session extends EventEmitter {
     }
 
     this.session = await this.client.resumeSession(sessionId, this.buildConfig(opts) as SessionConfig);
+
+    // Config is authoritative over the session's persisted model. A journal can
+    // name a retired model id (e.g. claude-opus-4.7-1m-internal); the SDK does
+    // not fall back like the interactive CLI does, it throws on the next send
+    // and every message bounces. Switch here so config always wins.
+    if (opts.model) {
+      try {
+        const current = await this.session.rpc.model.getCurrent();
+        const effortChanged = opts.reasoningEffort ? current?.reasoningEffort !== opts.reasoningEffort : false;
+        const tierChanged = opts.contextTier ? current?.contextTier !== opts.contextTier : false;
+        if (current?.modelId !== opts.model || effortChanged || tierChanged) {
+          await this.session.setModel(opts.model, {
+            ...(opts.reasoningEffort ? { reasoningEffort: opts.reasoningEffort } : {}),
+            ...(opts.contextTier ? { contextTier: opts.contextTier } : {}),
+          });
+        }
+      } catch (e) {
+        await this.kill();
+        throw new ModelUnavailableError(opts.model, e);
+      }
+    }
+
     this._alive = true;
     this.session.on((e: SessionEvent) => this.handleEvent(e));
   }

@@ -332,7 +332,7 @@ export async function handleConfigCallback(
         setCfg(chatId, prev);
         client.answerCallback?.(callbackId, "Couldn't apply change — reverted.");
       } else {
-        client.answerCallback?.(callbackId, "Saved — old session couldn't resume; next message starts fresh.");
+        client.answerCallback?.(callbackId, "Saved — old session couldn't resume; check the model is still available.");
       }
     }
   };
