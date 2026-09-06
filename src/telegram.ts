@@ -102,6 +102,9 @@ const UX_CALL_TIMEOUT_MS = 10_000;
  */
 const POLL_WATCHDOG_MS = 600_000;
 
+/** A `getUpdates` slower than this absorbed a failed connect + backoff (~1.5×/day). */
+export const SLOW_POLL_MS = 60_000;
+
 /**
  * Race a promise against a setTimeout. On timeout we abandon the awaited
  * call and continue — the underlying HTTPS request may still complete in
@@ -216,8 +219,13 @@ export class TelegramClient implements Client {
         // `result.result ?? result`, which discarded the envelope and hardcoded `ok:true`,
         // hiding all `BUTTON_DATA_INVALID` / `chat not found` / etc. failures from logs.
         const rxSummary = summarizeTelegramApiResult(method, result);
-        const rxFields = formatLogFields({ ...rxSummary, ms: Date.now() - startedAt });
-        if (rxSummary.ok === false) {
+        const ms = Date.now() - startedAt;
+        const rxFields = formatLogFields({ ...rxSummary, ms });
+        // A getUpdates far exceeding the 30s long-poll silently absorbed a failed
+        // connect (~127s) plus auto-retry backoff. Promote it rather than log twice:
+        // at verbose with ok=true it is indistinguishable from a healthy poll, which
+        // is exactly how this hid for six months.
+        if (rxSummary.ok === false || (method === 'getUpdates' && ms > SLOW_POLL_MS)) {
           log.warn('[Telegram API RX]', ...rxFields);
         } else {
           log.verbose('[Telegram API RX]', ...rxFields);

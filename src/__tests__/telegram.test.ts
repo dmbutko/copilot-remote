@@ -2,7 +2,7 @@ import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Bot } from 'grammy';
 import type { Update, UserFromGetMe } from 'grammy/types';
-import { TelegramClient, withAbortTimeout } from '../telegram.js';
+import { SLOW_POLL_MS, TelegramClient, withAbortTimeout } from '../telegram.js';
 
 const TEST_BOT_INFO: UserFromGetMe = {
   id: 999999,
@@ -862,5 +862,36 @@ describe('poll watchdog', () => {
 
     client.stop();
     assert.equal(watchdogOf(client), undefined, 'stop() must disarm');
+  });
+
+  it('promotes a slow getUpdates to warn so it is not mistaken for a healthy poll', async () => {
+    const client = makeClient();
+    const { log } = await import('../log.js');
+    const originalWarn = log.warn;
+    const warnings: string[][] = [];
+    log.warn = (...args: unknown[]) => {
+      warnings.push(args.map((a) => String(a)));
+    };
+
+    const realNow = Date.now;
+    try {
+      await loggerOf(client)(succeed, 'getUpdates', {}, undefined);
+      assert.equal(warnings.length, 0, 'a normal-speed poll must stay at verbose');
+
+      // The transformer reads Date.now() twice: once for startedAt, once for ms.
+      // Return a real start then a far-future end, so elapsed crosses the threshold.
+      let call = 0;
+      Date.now = () => (call++ === 0 ? realNow() : realNow() + SLOW_POLL_MS + 1);
+      await loggerOf(client)(succeed, 'getUpdates', {}, undefined);
+    } finally {
+      Date.now = realNow;
+      log.warn = originalWarn;
+      clearTimeout(watchdogOf(client));
+    }
+
+    assert.ok(
+      warnings.some((w) => w.some((s) => s.includes('Telegram API RX'))),
+      'a slow but successful getUpdates must be logged at warn, not verbose',
+    );
   });
 });
