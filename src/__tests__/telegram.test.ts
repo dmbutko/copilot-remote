@@ -809,3 +809,58 @@ describe('sendButtons — callback_data 64-byte guard', () => {
     assert.equal(Buffer.from(sent, 'utf8').toString('utf8'), sent, 'must round-trip as valid UTF-8');
   });
 });
+
+describe('poll watchdog', () => {
+  // Transformers are install-ordered (grammy client.d.ts: index 0 = first installed).
+  // telegram.ts installs: throttler, autoRetry, defaultParseMode, apiLogger, hydrateFiles.
+  const APILOGGER_INDEX = 3;
+
+  const makeClient = () => new TelegramClient({ botToken: 'test-token', allowedUsers: [] });
+  // The transformer type is per-method; the test drives it generically.
+  type LooseTransformer = (
+    prev: unknown,
+    method: string,
+    payload: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) => Promise<unknown>;
+  const loggerOf = (c: TelegramClient) =>
+    getBot(c).api.config.installedTransformers()[APILOGGER_INDEX] as unknown as LooseTransformer;
+  const watchdogOf = (c: TelegramClient) =>
+    (c as unknown as { pollWatchdog?: ReturnType<typeof setTimeout> }).pollWatchdog;
+
+  const succeed = async () => ({ ok: true, result: [] });
+
+  it('arms only on a successful getUpdates, and resets on each one', async () => {
+    const client = makeClient();
+    const logger = loggerOf(client);
+
+    await logger(succeed, 'sendMessage', {}, undefined);
+    assert.equal(watchdogOf(client), undefined, 'a non-getUpdates call must not arm the watchdog');
+
+    await logger(succeed, 'getUpdates', {}, undefined);
+    const first = watchdogOf(client);
+    assert.ok(first, 'a successful getUpdates must arm the watchdog');
+
+    await logger(succeed, 'getUpdates', {}, undefined);
+    assert.notEqual(watchdogOf(client), first, 'each success must replace the previous timer');
+
+    clearTimeout(watchdogOf(client));
+  });
+
+  it('does not arm when Telegram reports failure', async () => {
+    const client = makeClient();
+    const failed = async () => ({ ok: false, description: 'nope' });
+
+    await loggerOf(client)(failed, 'getUpdates', {}, undefined);
+    assert.equal(watchdogOf(client), undefined, 'ok:false must not count as hearing Telegram');
+  });
+
+  it('clears the watchdog on stop() so shutdown cannot be cut short', async () => {
+    const client = makeClient();
+    await loggerOf(client)(succeed, 'getUpdates', {}, undefined);
+    assert.ok(watchdogOf(client), 'precondition: armed');
+
+    client.stop();
+    assert.equal(watchdogOf(client), undefined, 'stop() must disarm');
+  });
+});

@@ -408,3 +408,19 @@ BrowserType.launch_persistent_context: Executable doesn't exist at
 - If Telegram polling appears stuck (no
   `[Telegram API RX] method="getUpdates"` for >30 s), suspect
   network/IPv6 before suspecting code.
+- **Polling stalls are invisible to error greps — measure gaps, not lines.**
+  A failed TCP connect to Telegram takes **~127 s** (`tcp_syn_retries=6`), and
+  `@grammyjs/auto-retry` retries `HttpError`s **forever**: `maxRetryAttempts`
+  only bounds response-based retries (429 / 5xx), while the thrown-`HttpError`
+  branch `continue`s without decrementing, doubling the backoff to a 1 h cap. Because `autoRetry` sits
+  *below* the apiLogger transformer, a recovered stall is logged as a healthy
+  `ok=true ms=165191` (127 s connect + 3 s backoff + 30 s poll) — that ~165 s
+  cluster happens **~1.5×/day** and is not an incident. An *unrecovered* one
+  logs nothing whatsoever, because the promise never settles. On 2026-09-06 the
+  bridge was deaf for 89 min with an empty journal while systemd reported
+  `active`; the wedged call only surfaced at shutdown as
+  `ms=5367044 error="Request aborted while waiting between retries"`.
+  **The health signal is the staleness of the last success, never the presence
+  of an error line** — hence `POLL_WATCHDOG_MS` in `src/telegram.ts`. To find
+  these, diff consecutive `getUpdates` timestamps; grepping for `error`/`fail`
+  cannot work, since the evidence is the *absence* of lines.

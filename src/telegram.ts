@@ -77,6 +77,32 @@ const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
 const UX_CALL_TIMEOUT_MS = 10_000;
 
 /**
+ * No successful `getUpdates` for this long ⇒ polling is wedged and the bridge
+ * cannot recover itself, so exit and let systemd respawn.
+ *
+ * Why it's needed: a TCP connect to Telegram that gets no SYN-ACK takes ~127s
+ * to fail (`tcp_syn_retries=6`), and `@grammyjs/auto-retry` retries `HttpError`s
+ * *forever* — `maxRetryAttempts` only governs response-based retries (429 /
+ * 5xx), while the thrown-`HttpError` branch `continue`s without decrementing,
+ * doubling the backoff to a 1h cap. A run of failed connects escalates into
+ * multi-hour silence.
+ *
+ * Why nothing logs it: `autoRetry` sits *below* the apiLogger transformer, so a
+ * recovered stall surfaces as a plain `ok=true ms=165191` (127s connect + 3s
+ * backoff + 30s poll — that's the ~165s cluster seen ~1.5×/day), and an
+ * unrecovered one logs nothing at all because the promise never settles.
+ * On 2026-09-06 the bridge sat deaf 89 minutes with an empty journal while
+ * systemd still reported `active`. Health here is the *staleness of the last
+ * success*, never the presence of an error line.
+ *
+ * Why 10 min: longest *recovered* poll in retained history is 533s (grammY's own
+ * 500s request timeout + backoff + a 30s long-poll); none exceeded 540s, so this
+ * has no historical false positives. Don't lower it without also lowering
+ * grammY's `timeoutSeconds` — that setting is global and would cap file uploads.
+ */
+const POLL_WATCHDOG_MS = 600_000;
+
+/**
  * Race a promise against a setTimeout. On timeout we abandon the awaited
  * call and continue — the underlying HTTPS request may still complete in
  * the background. Used for startup calls (`setMyCommands`, `deleteWebhook`,
@@ -136,6 +162,7 @@ export class TelegramClient implements Client {
   private topicNames = new Map<string, string>();
   private msgThreadMap = new Map<number, number>(); // msgId → threadId for callback resolution
   private updateSeq = 0;
+  private pollWatchdog?: ReturnType<typeof setTimeout>;
 
   // Event handlers (set by bridge consumer)
   onMessage?: Client['onMessage'];
@@ -194,6 +221,16 @@ export class TelegramClient implements Client {
           log.warn('[Telegram API RX]', ...rxFields);
         } else {
           log.verbose('[Telegram API RX]', ...rxFields);
+        }
+        // Only a successful getUpdates proves we can still hear Telegram. Created here
+        // and nowhere else, so it is unarmed until the first success — a process that
+        // never polls at all cannot restart-loop.
+        if (method === 'getUpdates' && rxSummary.ok !== false) {
+          clearTimeout(this.pollWatchdog);
+          this.pollWatchdog = setTimeout(() => {
+            log.error('[Telegram] No successful getUpdates in 10min — polling wedged, exiting for respawn');
+            process.exit(1);
+          }, POLL_WATCHDOG_MS);
         }
         if (log.shouldLog('debug')) {
           log.debug('[Telegram API RX RAW]', `method=${method}`, `result=${JSON.stringify(result)}`);
@@ -554,6 +591,11 @@ export class TelegramClient implements Client {
   }
 
   stop(): void {
+    // Shutdown awaits session.disconnect() (no local timeout) before exiting, so
+    // without this the watchdog could fire mid-cleanup and turn an intended
+    // exit(75) restart into an abrupt exit(1).
+    clearTimeout(this.pollWatchdog);
+    this.pollWatchdog = undefined;
     if (this.runner?.isRunning()) {
       this.runner.stop();
     }
