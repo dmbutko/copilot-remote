@@ -238,7 +238,7 @@ $PROG_ARGS
         <key>HOME</key>
         <string>$HOME</string>
         <key>NODE_OPTIONS</key>
-        <string>--experimental-sqlite</string>
+        <string>--experimental-sqlite --dns-result-order=ipv4first --no-network-family-autoselection</string>
 $EXTRA_ENV
     </dict>
     <key>RunAtLoad</key>
@@ -304,7 +304,7 @@ WorkingDirectory=$INSTALL_DIR
 Environment=COPILOT_REMOTE_WORKDIR=$HOME
 Environment=PATH=$(dirname "$NODE_BIN"):$(dirname "$COPILOT_BIN")${GH_DIR:+:$GH_DIR}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
-Environment=NODE_OPTIONS=--experimental-sqlite
+Environment=NODE_OPTIONS=--experimental-sqlite --dns-result-order=ipv4first --no-network-family-autoselection
 Restart=always
 RestartSec=5
 

@@ -405,22 +405,36 @@ BrowserType.launch_persistent_context: Executable doesn't exist at
 
 - The bot has historically wedged on IPv6. The systemd unit sets
   `NODE_OPTIONS=--dns-result-order=ipv4first` to avoid it.
-- If Telegram polling appears stuck (no
-  `[Telegram API RX] method="getUpdates"` for >30 s), suspect
-  network/IPv6 before suspecting code.
+- **Telegram can fail in Node even when `curl -4` works — and `curl` will
+  lie to you about it.** Node gives each *non-final* resolved address only
+  **250 ms** to connect (`autoSelectFamilyAttemptTimeout`). This box is in
+  Sydney and Telegram answers from Amsterdam, so a TCP connect takes ~290 ms
+  — just over the cap — while the IPv6 address is unroutable. Every connect
+  attempt was therefore killed ~40 ms short, surfacing as
+  `AggregateError [ETIMEDOUT]` in ~334 ms. `curl` and a raw `net.connect()`
+  to an IP literal both succeed, because neither applies that cap. Reproduce
+  with Node against the *hostname* (`https.request`/`node-fetch`), never with
+  `curl` or an IP. The unit sets `--no-network-family-autoselection`; keep it
+  in `install.sh` too, or a reinstall silently reverts it.
 - **Polling stalls are invisible to error greps — measure gaps, not lines.**
-  A failed TCP connect to Telegram takes **~127 s** (`tcp_syn_retries=6`), and
+  Note Node times out every attempt *except the last*, which waits for the
+  kernel (~131 s). Historical ~165 s polls are consistent with the final or
+  only resolved address timing out, then `auto-retry`'s 3 s delay, then a
+  normal 30 s poll — the logs do not identify which address family timed out,
+  so don't claim it was an IPv4 SYN timeout.
   `@grammyjs/auto-retry` retries `HttpError`s **forever**: `maxRetryAttempts`
   only bounds response-based retries (429 / 5xx), while the thrown-`HttpError`
-  branch `continue`s without decrementing, doubling the backoff to a 1 h cap. Because `autoRetry` sits
-  *below* the apiLogger transformer, a recovered stall is logged as a healthy
-  `ok=true ms=165191` (127 s connect + 3 s backoff + 30 s poll) — that ~165 s
-  cluster happens **~1.5×/day** and is not an incident. An *unrecovered* one
-  logs nothing whatsoever, because the promise never settles. On 2026-09-06 the
-  bridge was deaf for 89 min with an empty journal while systemd reported
-  `active`; the wedged call only surfaced at shutdown as
-  `ms=5367044 error="Request aborted while waiting between retries"`.
+  branch `continue`s without decrementing, doubling the backoff to a 1 h cap.
+  Because `autoRetry` sits *below* the apiLogger transformer, a recovered
+  stall is logged as a healthy-looking `ok=true ms=165191` — that ~165 s
+  cluster happens **~1.5×/day**; it is a known transient stall, not healthy.
+  An *unrecovered* one logs nothing whatsoever, because the promise never
+  settles. On 2026-09-06 the bridge was deaf for 89 min with an empty journal
+  while systemd reported `active`; the wedged call only surfaced at shutdown
+  as `ms=5367044 error="Request aborted while waiting between retries"`.
   **The health signal is the staleness of the last success, never the presence
-  of an error line** — hence `POLL_WATCHDOG_MS` in `src/telegram.ts`. To find
-  these, diff consecutive `getUpdates` timestamps; grepping for `error`/`fail`
+  of an error line** — hence `POLL_WATCHDOG_MS` in `src/telegram.ts`, which is
+  armed *before* the first poll because `run()` awaits `bot.init()` (a `getMe`
+  that can retry forever) before it ever issues `getUpdates`. To find these,
+  diff consecutive `getUpdates` timestamps; grepping for `error`/`fail`
   cannot work, since the evidence is the *absence* of lines.

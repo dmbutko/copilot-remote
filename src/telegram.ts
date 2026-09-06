@@ -230,16 +230,8 @@ export class TelegramClient implements Client {
         } else {
           log.verbose('[Telegram API RX]', ...rxFields);
         }
-        // Only a successful getUpdates proves we can still hear Telegram. Created here
-        // and nowhere else, so it is unarmed until the first success — a process that
-        // never polls at all cannot restart-loop.
-        if (method === 'getUpdates' && rxSummary.ok !== false) {
-          clearTimeout(this.pollWatchdog);
-          this.pollWatchdog = setTimeout(() => {
-            log.error('[Telegram] No successful getUpdates in 10min — polling wedged, exiting for respawn');
-            process.exit(1);
-          }, POLL_WATCHDOG_MS);
-        }
+        // Only a successful getUpdates proves we can still hear Telegram.
+        if (method === 'getUpdates' && rxSummary.ok !== false) this.armPollWatchdog();
         if (log.shouldLog('debug')) {
           log.debug('[Telegram API RX RAW]', `method=${method}`, `result=${JSON.stringify(result)}`);
         }
@@ -579,6 +571,7 @@ export class TelegramClient implements Client {
         },
       });
       log.info('[Telegram] Polling runner launched');
+      this.armPollWatchdog();
 
       // Set profile photo if configured
       const photoPath = this.config.profilePhoto;
@@ -596,6 +589,25 @@ export class TelegramClient implements Client {
         await new Promise((r) => setTimeout(r, RETRY_DELAY));
       }
     }
+  }
+
+  /**
+   * Armed before the first poll, because runner init can retry `getMe`
+   * indefinitely — and re-armed on every successful `getUpdates`.
+   *
+   * Arming at start (not on first success) matters: on 2026-09-06 a respawned
+   * process had every startup call time out and the runner then blocked in
+   * `bot.init()`, so it never issued a single `getUpdates` and had no success
+   * to arm on. It stayed deaf indefinitely while the host network was healthy.
+   * A runner that launched and never polls is exactly as broken as one that
+   * stopped, so both must be caught.
+   */
+  private armPollWatchdog(): void {
+    clearTimeout(this.pollWatchdog);
+    this.pollWatchdog = setTimeout(() => {
+      log.error('[Telegram] No successful getUpdates in 10min — polling wedged, exiting for respawn');
+      process.exit(1);
+    }, POLL_WATCHDOG_MS);
   }
 
   stop(): void {
