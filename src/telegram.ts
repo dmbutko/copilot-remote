@@ -19,6 +19,32 @@ import {
   summarizeTelegramUpdate,
   summarizeTextForLog,
 } from './transport-log.js';
+import dns from 'node:dns';
+import net from 'node:net';
+
+// Connection policy — in code, not NODE_OPTIONS, so it is version-controlled and
+// ships with `npm run build`. (install.sh silently dropped these flags once.)
+//
+// Node gives every resolved address except the LAST one a fixed budget to
+// connect, then abandons it. This box is in Sydney and Telegram answers from
+// Amsterdam, so a connect takes ~290ms — over the 250ms default. That was
+// harmless while DNS returned one usable address (it was last, so untimed), but
+// on 2026-09-06 systemd-networkd dropped the IPv6 default route without removing
+// the IPv6 *address*: DNS kept returning both families, IPv4 stopped being last,
+// and every attempt was killed ~40ms short. The bridge went deaf for 89 minutes.
+//
+// 2000ms clears the measured 285-300ms connect with room to spare. Do NOT use
+// --no-network-family-autoselection: it removes the timer by removing the
+// fallback, so a bad first address hangs on the kernel (~127s) with nothing to
+// fall back to — measured as a >12s hang where this setting recovers in 2.9s.
+// These setters override that flag if it is ever reintroduced upstream.
+//
+// ipv4first is a preference, not a pin: IPv6 is still used if IPv4 fails. Both
+// families measure identically (~290ms, 8/8), but IPv6 on this host has broken
+// twice and IPv4 never has.
+dns.setDefaultResultOrder('ipv4first');
+net.setDefaultAutoSelectFamily(true);
+net.setDefaultAutoSelectFamilyAttemptTimeout(2000);
 
 const MAX_MESSAGE_LENGTH = 4096;
 const DRAFT_ID_MAX = 2_147_483_647;

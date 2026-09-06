@@ -403,19 +403,40 @@ BrowserType.launch_persistent_context: Executable doesn't exist at
 
 ## Network gotchas
 
-- The bot has historically wedged on IPv6. The systemd unit sets
-  `NODE_OPTIONS=--dns-result-order=ipv4first` to avoid it.
+- **Connection policy lives in `src/telegram.ts`, not `NODE_OPTIONS`** —
+  `dns.setDefaultResultOrder`, `net.setDefaultAutoSelectFamily(true)` and
+  `net.setDefaultAutoSelectFamilyAttemptTimeout(2000)` at module scope. It was
+  in the systemd unit until 2026-09-06, where it was invisible to `git` and had
+  already been silently dropped once by `install.sh`. `NODE_OPTIONS` should
+  carry only `--experimental-sqlite`.
 - **Telegram can fail in Node even when `curl -4` works — and `curl` will
-  lie to you about it.** Node gives each *non-final* resolved address only
-  **250 ms** to connect (`autoSelectFamilyAttemptTimeout`). This box is in
-  Sydney and Telegram answers from Amsterdam, so a TCP connect takes ~290 ms
-  — just over the cap — while the IPv6 address is unroutable. Every connect
-  attempt was therefore killed ~40 ms short, surfacing as
-  `AggregateError [ETIMEDOUT]` in ~334 ms. `curl` and a raw `net.connect()`
-  to an IP literal both succeed, because neither applies that cap. Reproduce
-  with Node against the *hostname* (`https.request`/`node-fetch`), never with
-  `curl` or an IP. The unit sets `--no-network-family-autoselection`; keep it
-  in `install.sh` too, or a reinstall silently reverts it.
+  lie to you about it.** Node gives each *non-final* resolved address a fixed
+  budget to connect (`autoSelectFamilyAttemptTimeout`, default **250 ms**) and
+  then abandons it. This box is in Sydney and Telegram answers from Amsterdam,
+  so a TCP connect takes **~290 ms** — just over the default. That was harmless
+  while DNS returned one usable address (last = untimed), but on 2026-09-06
+  `systemd-networkd` dropped the IPv6 *default route* without removing the IPv6
+  *address*, so DNS kept returning both families, IPv4 stopped being last, and
+  every attempt was killed ~40 ms short — `AggregateError [ETIMEDOUT]` in
+  ~334 ms, 89 minutes deaf. `curl` and a raw `net.connect()` to an IP literal
+  both succeed because neither applies that cap, so **reproduce with Node
+  against the hostname** (`https.request`/`node-fetch`), never with `curl` or
+  an IP.
+- **Never use `--no-network-family-autoselection`.** It removes the timer by
+  removing the *fallback*: a bad first address then hangs on the kernel
+  (~127 s) with nothing to fall back to. Measured 2026-09-06 across 7 configs ×
+  6 fault scenarios: it hung >12 s where a 2000 ms attempt timeout recovered in
+  2.9 s. It was deployed for ~90 min that day as an emergency fix and replaced
+  once tested. The code setters override it if it is ever reintroduced.
+- Both families measure identically to Telegram (~285-295 ms, 8/8). `ipv4first`
+  is a preference, not a pin — IPv6 is still used if IPv4 fails — kept only
+  because IPv6 on this host has broken twice and IPv4 never has.
+- **A dead route is invisible from the bridge's side.** `systemd-networkd` can
+  fail once and stay failed: on 2026-09-06 it logged exactly two lines all day
+  (`eth0: Could not set route: Connection timed out` / `eth0: Failed`), went to
+  `State: routable (failed)`, and never retried — only a VM reboot fixed it.
+  **Check `networkctl status eth0` and `journalctl -u systemd-networkd` before
+  diagnosing the bridge.**
 - **Polling stalls are invisible to error greps — measure gaps, not lines.**
   Note Node times out every attempt *except the last*, which waits for the
   kernel (~131 s). Historical ~165 s polls are consistent with the final or
