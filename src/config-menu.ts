@@ -30,7 +30,7 @@ function pfx(chatId: string, data: string): string {
 
 export async function sendConfigMenu(chatId: string, deps: ConfigMenuDeps, editId?: number): Promise<void> {
   const { client, configStore } = deps;
-  const c = configStore.get(chatId);
+  const c = configStore.getGlobal();
   const globalCfg = configStore.raw();
 
   const text =
@@ -74,7 +74,7 @@ export async function sendConfigMenu(chatId: string, deps: ConfigMenuDeps, editI
 
 export async function sendToolsMenu(chatId: string, editId: number, deps: ConfigMenuDeps): Promise<void> {
   const { client, configStore, sessions } = deps;
-  const c = configStore.get(chatId);
+  const c = configStore.getGlobal();
 
   let tools: string[] = [];
   const s = sessions.get(chatId);
@@ -117,7 +117,7 @@ export async function sendToolsMenu(chatId: string, editId: number, deps: Config
 
 export async function sendReasoningMenu(chatId: string, editId: number, deps: ConfigMenuDeps): Promise<void> {
   const { client, configStore } = deps;
-  const c = configStore.get(chatId);
+  const c = configStore.getGlobal();
 
   let models: ModelInfo[] = [];
   let loadFailed = false;
@@ -185,7 +185,7 @@ export async function sendReasoningMenu(chatId: string, editId: number, deps: Co
 
 export async function sendContextMenu(chatId: string, editId: number, deps: ConfigMenuDeps): Promise<void> {
   const { client, configStore } = deps;
-  const c = configStore.get(chatId);
+  const c = configStore.getGlobal();
 
   const tiers: { value: ContextTier; label: string }[] = [
     { value: 'default', label: 'Default' },
@@ -209,7 +209,7 @@ export async function sendContextMenu(chatId: string, editId: number, deps: Conf
 
 export async function sendDisplayMenu(chatId: string, editId: number, deps: ConfigMenuDeps): Promise<void> {
   const { client, configStore } = deps;
-  const c = configStore.get(chatId);
+  const c = configStore.getGlobal();
 
   const toggle = (on: boolean, label: string, data: string) => ({
     text: label,
@@ -230,7 +230,7 @@ export async function sendDisplayMenu(chatId: string, editId: number, deps: Conf
 
 export async function sendSecurityMenu(chatId: string, editId: number, deps: ConfigMenuDeps): Promise<void> {
   const { client, configStore } = deps;
-  const c = configStore.get(chatId);
+  const c = configStore.getGlobal();
 
   const buttons: { text: string; data: string; style?: string }[][] = [];
   for (const [kind, label] of Object.entries(PERM_KIND_LABELS)) {
@@ -251,7 +251,7 @@ export async function sendSecurityMenu(chatId: string, editId: number, deps: Con
 
 export async function sendModelPicker(chatId: string, editId: number, deps: ConfigMenuDeps): Promise<void> {
   const { client, configStore } = deps;
-  const c = configStore.get(chatId);
+  const c = configStore.getGlobal();
 
   let models: ModelInfo[] = [];
   try {
@@ -313,7 +313,10 @@ export async function handleConfigCallback(
   deps: ConfigMenuDeps,
 ): Promise<boolean> {
   const { client, configStore, sessions } = deps;
-  const cfg = (key: string) => configStore.get(key);
+  // /config edits the GLOBAL defaults, so it must read and show globals. Reading
+  // the merged view here would display a chat's own override as if it were the
+  // default, and the whole-config writes below would then promote it globally.
+  const cfg = (_key?: string) => configStore.getGlobal();
   const setCfg = (key: string, updates: Partial<ChatConfig>) => configStore.set(key, updates, true);
 
   // Apply a config change by rebuilding the saved session. On failure, suspend

@@ -13,10 +13,53 @@ export interface TelegramToolCallbacks {
   react: (messageId: number, emoji: string) => Promise<void>;
   sendContact: (phone: string, firstName: string, lastName?: string) => Promise<void>;
   sendPoll: (question: string, options: string[], isAnonymous?: boolean, allowsMultiple?: boolean) => Promise<number>;
+  setChatModel: (args: ChatModelRequest) => Promise<ChatModelResult>;
+}
+
+export interface ChatModelRequest {
+  model?: string;
+  reasoningEffort?: string;
+  contextTier?: 'default' | 'long_context';
+  reset?: boolean;
+}
+
+export interface ChatModelResult {
+  ok: boolean;
+  message: string;
 }
 
 export function createTelegramTools(cb: TelegramToolCallbacks) {
   return [
+    defineTool('set_chat_model', {
+      // defer:'never' — custom tools are deferrable by default, and a deferred
+      // tool is only discoverable via tool search. This one must always be
+      // loaded or an explicit "use opus here" silently does nothing.
+      defer: 'never',
+      description:
+        'Change the model, reasoning effort, or context tier for THIS chat only (global defaults are unaffected). ' +
+        'Call ONLY when the user explicitly asks to change or reset this chat’s settings — never for comparisons, ' +
+        'recommendations, or hypothetical discussion about models. The model name may be partial ("astra" resolves ' +
+        'to the matching id). For reasoning, pass "highest" or "lowest" to pick the strongest/weakest level the ' +
+        'chosen model supports, or an explicit level. Returns the applied settings; report them to the user verbatim.',
+      parameters: {
+        type: 'object',
+        properties: {
+          model: { type: 'string', description: 'Model id or a unique fragment of one, e.g. "astra"' },
+          reasoningEffort: {
+            type: 'string',
+            description: '"highest", "lowest", an explicit level (e.g. "high"), or "default" to unset',
+          },
+          contextTier: {
+            type: 'string',
+            enum: ['default', 'long_context'],
+            description: 'Context window tier; only applies on models that support it',
+          },
+          reset: { type: 'boolean', description: 'Clear this chat’s overrides so it follows the global defaults' },
+        },
+        required: [],
+      },
+      handler: async (args: ChatModelRequest): Promise<ChatModelResult> => cb.setChatModel(args),
+    }),
     defineTool('send_notification', {
       description: 'Send a notification message to the user on Telegram.',
       parameters: {

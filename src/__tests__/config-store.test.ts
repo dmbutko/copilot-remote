@@ -84,22 +84,57 @@ describe('ConfigStore', () => {
   it('thread overrides merge with global', () => {
     const store = make();
     const threadKey = 'thread-merge-' + Date.now();
-    store.set(threadKey, { showThinking: true }, false);
+    store.set(threadKey, { model: 'thread-model' }, false);
     const cfg = store.get(threadKey);
-    assert.equal(cfg.showThinking, true);
+    assert.equal(cfg.model, 'thread-model');
     // Other fields come from global
-    assert.equal(cfg.model, store.getGlobal().model);
+    assert.equal(cfg.showThinking, store.getGlobal().showThinking);
   });
 
-  it('autoApprove merges correctly', () => {
+  it('per-chat overrides are limited to model/reasoning/context', () => {
+    // Permission- and display-shaped settings stay global on purpose: a chat
+    // must never be able to quietly diverge on autoApprove.
     const store = make();
-    const threadKey = 'thread-approve-' + Date.now();
+    const key = 'restricted-' + Date.now();
     const globalShell = store.getGlobal().autoApprove.shell;
-    store.set(threadKey, { autoApprove: { shell: !globalShell } as any }, false);
-    const cfg = store.get(threadKey);
-    assert.equal(cfg.autoApprove.shell, !globalShell);
-    // Other approve settings come from global
-    assert.equal(cfg.autoApprove.read, store.getGlobal().autoApprove.read);
+    const globalThinking = store.getGlobal().showThinking;
+    store.set(key, { showThinking: !globalThinking, autoApprove: { shell: !globalShell } } as never, false);
+    assert.equal(store.get(key).showThinking, globalThinking, 'showThinking must not be overridable');
+    assert.equal(store.get(key).autoApprove.shell, globalShell, 'autoApprove must not be overridable');
+    assert.equal(store.hasOverrides(key), false, 'a non-overridable-only update leaves no override');
+  });
+
+  it('per-chat overrides survive a restart and never touch config.json', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfgstore-persist-'));
+    try {
+      const key = 'telegram--100:11';
+      // Seed a real config.json so the byte-identical assertion below is
+      // meaningful (an absent file would compare null === null trivially).
+      fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ model: 'global-model' }, null, 2));
+      const first = new ConfigStore({ configDir: dir });
+      const configBefore = fs.readFileSync(path.join(dir, 'config.json'), 'utf-8');
+
+      first.set(key, { model: 'gpt-6-astra', reasoningEffort: 'max' }, false);
+
+      // Reload from disk — this is what a bot respawn does.
+      const second = new ConfigStore({ configDir: dir });
+      assert.equal(second.get(key).model, 'gpt-6-astra');
+      assert.equal(second.get(key).reasoningEffort, 'max');
+      assert.equal(second.hasOverrides(key), true);
+      assert.equal(second.getGlobal().model, 'global-model', 'global must be untouched');
+
+      // Writing config.json is what triggers a RestartManager restart, so a
+      // per-chat change must leave it byte-identical.
+      const configAfter = fs.readFileSync(path.join(dir, 'config.json'), 'utf-8');
+      assert.equal(configAfter, configBefore, 'per-chat change must not rewrite config.json');
+      assert.ok(fs.existsSync(path.join(dir, 'chat-overrides.json')));
+
+      // Reset is durable too.
+      assert.equal(second.resetOverrides(key), true);
+      assert.equal(new ConfigStore({ configDir: dir }).hasOverrides(key), false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('hasOverrides tracks thread state', () => {

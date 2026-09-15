@@ -1,5 +1,5 @@
 // Copilot Remote — Telegram ↔ Copilot SDK bridge
-import { Session } from './session.js';
+import { ModelUnavailableError, Session } from './session.js';
 import type {
   FileAttachment,
   SessionStreamEvent,
@@ -32,6 +32,9 @@ import {
 } from './restart-manager.js';
 import { acquireSingleInstanceLock, createInstanceOwner } from './single-instance.js';
 import { finalizeStreamResponse } from './stream-lifecycle.js';
+import type { ModelInfo } from '@github/copilot-sdk';
+import { describeOverride, modelId, overrideFooter, resolveModel, resolveReasoning } from './chat-model.js';
+import type { ChatModelRequest, ChatModelResult } from './tools.js';
 import {
   extractAssistantPlan,
   formatSubagentStatus,
@@ -397,6 +400,135 @@ async function main(): Promise<void> {
   // Thin delegates (suspendSession/archiveSession/getSession) are wired there too.
 
   // Get or create session
+  /**
+   * Apply a per-chat model/effort/tier change requested via the `set_chat_model`
+   * tool. Order matters: resolve → validate → apply to the live session → only
+   * then persist, so a chat can never be pinned to something the SDK rejected.
+   */
+  async function applyChatModel(chatId: string, session: Session, req: ChatModelRequest): Promise<ChatModelResult> {
+    if (req.reset) {
+      // No early return at all: neither "no override in memory" nor "disk write
+      // succeeded" proves the LIVE session was switched back. A previous reset
+      // can have saved cleanly and then thrown on the switch, leaving the chat
+      // still answering on the pinned model — so an explicit reset always
+      // re-attempts the switch.
+      configStore.resetOverrides(chatId);
+      const saved = configStore.lastOverrideWriteOk;
+      const g = configStore.getGlobal();
+      let switched: { deferred?: boolean } | undefined;
+      let switchErr: unknown;
+      try {
+        // An empty global model means there is nothing to switch TO: the session
+        // keeps what it has until the next start, so don't claim an immediate revert.
+        if (g.model) {
+          switched = await session.setModel(g.model, {
+            ...(g.reasoningEffort ? { reasoningEffort: g.reasoningEffort } : {}),
+            contextTier: g.contextTier,
+          });
+        }
+      } catch (e) {
+        switchErr = e;
+        log.warn('[chat-model] reset: live switch failed:', e);
+      }
+      const applies =
+        switchErr || !g.model
+          ? 'takes effect on the next session'
+          : switched?.deferred
+            ? 'queued, applies from your next message'
+            : 'applied now';
+      const durability = saved ? '' : ' (not saved — the old pin returns after a restart)';
+      return {
+        ok: true,
+        message: `Reverted to the global defaults (${describeOverride(g)}) — ${applies}.${durability}`,
+      };
+    }
+
+    const models = await session.listModels();
+    const current = configStore.get(chatId);
+
+    let targetModel = current.model;
+    if (req.model) {
+      const r = resolveModel(req.model, models);
+      if ('error' in r) return { ok: false, message: r.error };
+      targetModel = r.id;
+    }
+    const info = models.find((m) => modelId(m) === targetModel);
+    if (!info) return { ok: false, message: `Model "${targetModel}" is not available.` };
+
+    // Effort is validated against the TARGET model, not the outgoing one.
+    let effort = current.reasoningEffort;
+    if (req.reasoningEffort !== undefined) {
+      const r = resolveReasoning(req.reasoningEffort, info);
+      if ('error' in r) return { ok: false, message: r.error };
+      effort = r.effort;
+    } else if (effort && !((info.supportedReasoningEfforts ?? []) as string[]).includes(effort)) {
+      // Inherited effort is incompatible with the new model. Clear it rather than
+      // let the switch fail — same rule /config applies (config-menu.ts).
+      effort = '';
+    }
+    const tier = req.contextTier ?? current.contextTier;
+
+    const res = await session.setModel(targetModel, {
+      ...(effort ? { reasoningEffort: effort } : {}),
+      contextTier: tier,
+    });
+    configStore.set(chatId, { model: targetModel, reasoningEffort: effort, contextTier: tier }, false);
+
+    const applied = describeOverride({ model: targetModel, reasoningEffort: effort, contextTier: tier });
+    const durable = configStore.lastOverrideWriteOk;
+    log.info('[chat-model]', chatId, '->', applied, res.deferred ? '(queued)' : '(live)', durable ? '' : '(UNSAVED)');
+    const base = res.deferred
+      ? `Set to ${applied} — queued, applies from your next message.`
+      : `This chat now uses ${applied}.`;
+    // Never claim durability we did not achieve: a failed write means the pin is
+    // live now but silently gone after the next restart.
+    return { ok: true, message: durable ? base : `${base} (applied live, but could not be saved to disk)` };
+  }
+
+  /**
+   * Footer shown while a chat diverges from global. `listModels()` is cached by
+   * the SDK until disconnect, so this costs nothing per reply.
+   */
+  async function chatOverrideFooter(chatId: string, session: Session): Promise<string> {
+    if (!configStore.hasOverrides(chatId)) return '';
+    const models = await session.listModels().catch(() => []);
+    return overrideFooter(configStore.get(chatId), configStore.getGlobal(), models);
+  }
+
+  /**
+   * Before a COLD session start, drop a pin whose model no longer exists.
+   *
+   * Without this a retired pin is a sticky trap: session start can fail with an
+   * unwrapped error (createSession/resumeSession are outside the
+   * ModelUnavailableError wrapper), `/config` only edits globals so it cannot
+   * clear the pin, `/new` keeps it, and clearing it by free text needs the very
+   * model that is broken. Only a successfully-fetched, non-empty catalogue that
+   * omits the pin authorises clearing — a lookup failure never auto-resets.
+   */
+  async function clearRetiredPin(chatId: string): Promise<void> {
+    if (!configStore.hasOverrides(chatId)) return;
+    const pinned = configStore.get(chatId).model;
+    if (!pinned) return;
+    let models: ModelInfo[];
+    try {
+      models = await Session.listModelsFresh({
+        binary: bin,
+        cliUrl: config.cliUrl,
+        githubToken: config.githubToken,
+        provider: config.provider,
+      });
+    } catch {
+      return; // Can't prove it's gone — leave the pin alone.
+    }
+    const ids = models.map((m) => m.id ?? m.name).filter(Boolean);
+    if (!ids.length || ids.includes(pinned)) return;
+    configStore.resetOverrides(chatId);
+    log.warn('[chat-model] pinned model retired — cleared for', chatId, pinned);
+    await client
+      .sendMessage(chatId, `⚠️ ${pinned} is no longer available — this chat reverted to ${configStore.getGlobal().model}.`)
+      .catch(() => {});
+  }
+
   // Register persistent listeners on a session (called once per session, not per message)
   function registerSessionListeners(session: Session, chatId: string) {
     session.on('usage', (u: Record<string, unknown>) => {
@@ -511,6 +643,18 @@ async function main(): Promise<void> {
         info.resolve(0);
       }
     });
+
+    session.on(
+      'set_chat_model',
+      async (info: ChatModelRequest & { resolve: (r: ChatModelResult) => void }) => {
+        try {
+          info.resolve(await applyChatModel(chatId, session, info));
+        } catch (e) {
+          log.warn('[chat-model] failed:', e);
+          info.resolve({ ok: false, message: `Could not apply: ${e instanceof Error ? e.message : String(e)}` });
+        }
+      },
+    );
 
     session.on('react_to', async (info: { messageId: number; emoji: string }) => {
       client.setReaction(chatId, info.messageId, info.emoji).catch(() => {});
@@ -813,6 +957,9 @@ async function main(): Promise<void> {
     try {
       if (!sessions.get(chatId)?.alive) {
         await sendPlaceholder();
+        // Cold start: a retired pin must be cleared here, before it can fail
+        // inside session start where the error may not be classifiable.
+        await clearRetiredPin(chatId);
       }
       session = await getSession(chatId);
       sessionReadyAt = performance.now();
@@ -833,19 +980,27 @@ async function main(): Promise<void> {
       const unsupportedReasoning = msg.includes('reasoning effort');
       const unsupportedContextTier =
         lower.includes('long_context') || (lower.includes('context') && lower.includes('tier'));
-      if (unsupportedReasoning || unsupportedContextTier) {
-        if (unsupportedReasoning) c.reasoningEffort = '';
-        if (unsupportedContextTier) c.contextTier = 'default';
-        setCfg(chatId, c);
-        // Log the raw error so we capture the real (currently-unproven) message
-        // strings — the contextTier matcher above is a best-guess until we see one.
-        log.warn(
-          '[prompt:session] unsupported per-model option — reset + retry',
-          `reasoning=${unsupportedReasoning}`,
-          `contextTier=${unsupportedContextTier}`,
-          `error=${msg}`,
-        );
-        const retryTag = unsupportedReasoning ? 'no-reasoning-effort' : 'default-context-tier';
+      // Recovery scope is decided by whether the CHAT has a pin, not by the
+      // exception class. A per-chat failure must never write global config, and
+      // the error class is not a reliable discriminator: ModelUnavailableError
+      // embeds its cause's text (so it matches the heuristics below), and a bare
+      // Error('unsupported reasoning effort') from createSession/resumeSession is
+      // not wrapped at all. Keying off hasOverrides() is exact.
+      const hasPin = configStore.hasOverrides(chatId);
+      const optionError = unsupportedReasoning || unsupportedContextTier;
+      const modelGone = err instanceof ModelUnavailableError;
+      if (hasPin && (optionError || modelGone)) {
+        // Per-chat recovery: drop this chat's pin and retry on global. Chats
+        // without a pin keep their previous behaviour exactly (below).
+        let retryTag: string;
+        {
+          configStore.resetOverrides(chatId);
+          retryTag = 'stale-pin';
+          log.warn('[prompt:session] per-chat settings failed — chat reverted to global', `error=${msg}`);
+          await client
+            .sendMessage(chatId, `⚠️ This chat's model settings failed — reverted to ${configStore.getGlobal().model}.`)
+            .catch(() => {});
+        }
         try {
           session = await getSession(chatId);
           sessionReadyAt = performance.now();
@@ -860,6 +1015,35 @@ async function main(): Promise<void> {
             `busy=${session.busy}`,
             `retry=${retryTag}`,
           );
+        } catch (err2: unknown) {
+          if (typingInterval) clearInterval(typingInterval);
+          await client.sendMessage(chatId, '❌ Session failed: ' + ((err2 as Error)?.message ?? String(err2)), {
+            replyTo: msgId,
+          });
+          return;
+        }
+      } else if (!hasPin && optionError) {
+        // Pre-existing global recovery — reached only by chats with no override.
+        // Writes ONLY the affected keys: `c` was captured before clearRetiredPin()
+        // may have run, so writing the whole snapshot could promote a
+        // just-cleared retired model into the global defaults.
+        const fix: Partial<ChatConfig> = {};
+        if (unsupportedReasoning) fix.reasoningEffort = '';
+        if (unsupportedContextTier) fix.contextTier = 'default';
+        setCfg(chatId, fix);
+        const retryTag = unsupportedReasoning ? 'no-reasoning-effort' : 'default-context-tier';
+        // Log the raw error so we capture the real (currently-unproven) message
+        // strings — the contextTier matcher above is a best-guess until we see one.
+        log.warn(
+          '[prompt:session] unsupported per-model option — reset + retry',
+          `reasoning=${unsupportedReasoning}`,
+          `contextTier=${unsupportedContextTier}`,
+          `error=${msg}`,
+        );
+        try {
+          session = await getSession(chatId);
+          sessionReadyAt = performance.now();
+          markTimeline('session', `id=${session.sessionId ?? '-'};retry=${retryTag}`, sessionReadyAt);
         } catch (err2: unknown) {
           if (typingInterval) clearInterval(typingInterval);
           await client.sendMessage(chatId, '❌ Session failed: ' + ((err2 as Error)?.message ?? String(err2)), {
@@ -1315,12 +1499,16 @@ async function main(): Promise<void> {
 
       const final = res.content;
       log.debug('[finalize] streamMsgId:', streamMsgId, 'final length:', final.length);
+      // Appended BEFORE finalizeStreamResponse so the suffix is inside the text
+      // the chunker measures — appending after would overflow the 4096 cap or
+      // split a surrogate pair at the boundary.
+      const withFooter = final + (await chatOverrideFooter(chatId, session));
       const tgStart = performance.now();
       const finalization = await finalizeStreamResponse({
         client,
         chatId,
         streamMsgId,
-        final,
+        final: withFooter,
         responseMessageOpts,
         // Edits are silent on Telegram; in steering mode the answer must arrive
         // as a fresh (notifying) message below any mid-turn steer.
@@ -1964,9 +2152,9 @@ async function main(): Promise<void> {
             await client.sendMessage(chatId, '❌ ' + e);
           }
         } else if (args[0]) {
-          const c = cfg(chatId);
-          c.agent = args[0];
-          setCfg(chatId, c);
+          // Sparse write: sending the whole merged config would promote any
+          // per-chat override into the global defaults.
+          setCfg(chatId, { agent: args[0] });
           await client.sendMessage(chatId, '🤖 Agent `' + args[0] + '` set for next session.');
         }
         break;

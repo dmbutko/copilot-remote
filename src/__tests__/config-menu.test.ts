@@ -33,7 +33,17 @@ function createDeps(initialConfig?: Partial<ChatConfig>) {
   };
 
   const configStore = {
-    get: () => ({ ...state.config, autoApprove: { ...state.config.autoApprove } }),
+    // Deliberately DIFFERENT from getGlobal: this stands in for a chat that has
+    // a per-chat override. /config is a global editor, so any menu that reads
+    // this instead of getGlobal() would display the override as the default —
+    // and its writes would then promote it globally. A revert of that fix makes
+    // the menu assertions below fail.
+    get: () => ({
+      ...state.config,
+      model: 'chat-override-model',
+      autoApprove: { ...state.config.autoApprove },
+    }),
+    getGlobal: () => ({ ...state.config, autoApprove: { ...state.config.autoApprove } }),
     set: (_key: string, updates: Partial<ChatConfig>) => {
       state.config = {
         ...state.config,
@@ -79,6 +89,19 @@ describe('config-menu', () => {
     const buttons = firstCall.buttons as Array<Array<{ text: string }>>;
     const messagesBtn = buttons.find((row) => row[0]?.text?.startsWith('📨 Messages'))?.[0];
     assert.equal(messagesBtn?.text, '📨 Messages: Queue next message');
+  });
+
+  it('shows the GLOBAL model, not a chat override', async () => {
+    // /config edits globals, so it must display globals. If a renderer reverts
+    // to configStore.get(chatId) this shows 'chat-override-model' instead.
+    const { deps } = createDeps({ model: 'global-model' });
+    await sendConfigMenu('chat-1', deps as never);
+
+    const call = deps.client.sendButtonsCalls[0];
+    const buttons = call?.buttons as Array<Array<{ text: string }>>;
+    const rendered = String(call?.text ?? '') + ' | ' + buttons.flat().map((b) => b.text).join(' | ');
+    assert.ok(rendered.includes('global-model'), 'must render the global default');
+    assert.ok(!rendered.includes('chat-override-model'), 'must not render a per-chat override as the global default');
   });
 
   it('toggles message mode and updates the live session setting', async () => {

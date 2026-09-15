@@ -7,6 +7,30 @@ import { atomicWriteSync } from './util/atomic-write.js';
 
 const CONFIG_DIR = join(process.env.HOME ?? '.', '.copilot-remote');
 export const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
+/**
+ * Per-chat overrides live in their own file, deliberately NOT a RestartManager
+ * watch target (it watches CONFIG_FILE by path, never the directory — see
+ * restart-manager.ts). Writing config.json restarts the bot, which is wanted for
+ * global changes and unwanted for a one-chat model switch.
+ */
+export const OVERRIDES_FILE = join(CONFIG_DIR, 'chat-overrides.json');
+
+/** Fields a chat may override. Everything else stays global-only by design. */
+export const PER_CHAT_KEYS = ['model', 'reasoningEffort', 'contextTier'] as const;
+export type PerChatKey = (typeof PER_CHAT_KEYS)[number];
+
+/**
+ * Narrow an update to the overridable fields. Overrides are deliberately
+ * restricted: display toggles, autopilot and autoApprove stay global so a chat
+ * can never quietly diverge on a permission-shaped setting.
+ */
+function pickPerChat(updates: Partial<ChatConfig>): Partial<ChatConfig> {
+  const out: Partial<ChatConfig> = {};
+  for (const k of PER_CHAT_KEYS) {
+    if (updates[k] !== undefined) (out as Record<string, unknown>)[k] = updates[k];
+  }
+  return out;
+}
 
 export type PermKind = 'shell' | 'write' | 'mcp' | 'read' | 'url' | 'custom-tool';
 export type MessageMode = 'enqueue' | 'immediate';
@@ -123,6 +147,7 @@ export class ConfigStore {
   private overrides = new Map<string, Partial<ChatConfig>>();
   private readonly configDir: string;
   private readonly configFile: string;
+  private readonly overridesFile: string;
 
   /**
    * @param opts.configDir Override the default `~/.copilot-remote/` directory.
@@ -132,8 +157,40 @@ export class ConfigStore {
   constructor(opts: { configDir?: string } = {}) {
     this.configDir = opts.configDir ?? CONFIG_DIR;
     this.configFile = opts.configDir ? join(opts.configDir, 'config.json') : CONFIG_FILE;
+    this.overridesFile = opts.configDir ? join(opts.configDir, 'chat-overrides.json') : OVERRIDES_FILE;
     this.global = this.load();
+    this.loadOverrides();
   }
+
+  private loadOverrides(): void {
+    try {
+      if (!existsSync(this.overridesFile)) return;
+      const data = JSON.parse(readFileSync(this.overridesFile, 'utf-8')) as Record<string, Partial<ChatConfig>>;
+      for (const [key, value] of Object.entries(data)) {
+        const picked = pickPerChat(value);
+        if (Object.keys(picked).length) this.overrides.set(key, picked);
+      }
+      log.info('[config] Loaded', this.overrides.size, 'chat override(s) from', this.overridesFile);
+    } catch (e) {
+      // Fail open: a corrupt overrides file must never stop the bridge starting.
+      log.error('[config] Failed to load chat overrides:', e);
+    }
+  }
+
+  private saveOverrides(): boolean {
+    try {
+      if (!existsSync(this.configDir)) mkdirSync(this.configDir, { recursive: true });
+      const obj = Object.fromEntries(this.overrides);
+      atomicWriteSync(this.overridesFile, JSON.stringify(obj, null, 2), { mode: 0o600 });
+      return true;
+    } catch (e) {
+      log.error('[config] Failed to save chat overrides:', e);
+      return false;
+    }
+  }
+
+  /** True when the last override write reached disk. Callers report durability honestly. */
+  lastOverrideWriteOk = true;
 
   /** Get the raw global config file (non-ChatConfig fields like provider, mcpServers, etc.) */
   raw(): GlobalConfig {
@@ -173,11 +230,10 @@ export class ConfigStore {
       this.save();
     } else {
       const existing = this.overrides.get(key) ?? {};
-      Object.assign(existing, normalizedUpdates);
-      if (updates.autoApprove) {
-        existing.autoApprove = { ...(existing.autoApprove ?? {}), ...updates.autoApprove };
-      }
-      this.overrides.set(key, existing);
+      Object.assign(existing, pickPerChat(normalizedUpdates));
+      if (Object.keys(existing).length) this.overrides.set(key, existing);
+      else this.overrides.delete(key);
+      this.lastOverrideWriteOk = this.saveOverrides();
     }
     return this.get(key);
   }
@@ -192,9 +248,16 @@ export class ConfigStore {
     return { ...this.global, autoApprove: { ...this.global.autoApprove } };
   }
 
-  /** Reset thread overrides */
-  resetOverrides(key: string): void {
-    this.overrides.delete(key);
+  /**
+   * Reset thread overrides so the chat inherits global again. Returns true if any
+   * existed in memory. Always rewrites the file: after a failed removal write the
+   * entry is gone from memory but still on disk, so a retry must be able to reach
+   * the write again rather than short-circuit on the empty map.
+   */
+  resetOverrides(key: string): boolean {
+    const had = this.overrides.delete(key);
+    this.lastOverrideWriteOk = this.saveOverrides();
+    return had;
   }
 
   private load(): ChatConfig {

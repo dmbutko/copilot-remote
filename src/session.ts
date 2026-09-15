@@ -246,6 +246,23 @@ export class Session extends EventEmitter {
     return client.listModels();
   }
 
+  /**
+   * Uncached catalogue fetch. `listModels()` caches for the client's lifetime and
+   * the shared client deliberately outlives sessions (`releaseClient` keeps it
+   * alive at zero references), so session teardown does NOT refresh it. Callers
+   * that must prove a model is really gone have to bypass that cache.
+   */
+  static async listModelsFresh(opts?: {
+    binary?: string;
+    cliUrl?: string;
+    githubToken?: string;
+    provider?: RemoteProviderConfig;
+  }): Promise<ModelInfo[]> {
+    const client = await Session.getSharedClient(opts, false);
+    const res = await client.rpc.models.list({});
+    return (res?.models ?? []) as unknown as ModelInfo[];
+  }
+
   static async deletePersistedSession(
     sessionId: string,
     opts?: { binary?: string; cliUrl?: string; githubToken?: string; provider?: RemoteProviderConfig },
@@ -467,6 +484,13 @@ export class Session extends EventEmitter {
         sendPoll: async (question, options, isAnonymous, allowsMultiple) => {
           return new Promise((resolve) => {
             this.emit('poll', { question, options, isAnonymous, allowsMultiple, resolve });
+          });
+        },
+        // Resolution, validation and persistence all live in the bridge handler so
+        // the tool cannot report success before the change is actually durable.
+        setChatModel: async (args) => {
+          return new Promise((resolve) => {
+            this.emit('set_chat_model', { ...args, resolve });
           });
         },
       }),
@@ -1132,8 +1156,28 @@ export class Session extends EventEmitter {
 
   // ── SDK RPCs ──
 
-  async setModel(model: string) {
-    this.session?.setModel(model);
+  /**
+   * Switch model (optionally with effort/tier) on the live session.
+   *
+   * Uses `rpc.model.switchTo` rather than the SDK's `setModel` helper so the
+   * result is observable: it reports `deferred: true` when a turn is active,
+   * in which case the change is enqueued and drains at the turn boundary
+   * instead of silently not applying. `deferIfModelChangeQueued` keeps multiple
+   * requests FIFO. Previously this dropped its options and wasn't awaited, so
+   * effort/tier changes were lost and failures were invisible.
+   */
+  async setModel(
+    model: string,
+    opts?: { reasoningEffort?: string; contextTier?: ContextTier },
+  ): Promise<{ modelId?: string; deferred?: boolean }> {
+    if (!this.session) throw new Error('Session not started');
+    const res = await this.session.rpc.model.switchTo({
+      modelId: model,
+      ...(opts?.reasoningEffort ? { reasoningEffort: opts.reasoningEffort } : {}),
+      ...(opts?.contextTier ? { contextTier: opts.contextTier } : {}),
+      deferIfModelChangeQueued: true,
+    });
+    return { modelId: res?.modelId, deferred: res?.deferred };
   }
   async listModels(): Promise<ModelInfo[]> {
     return this.client?.listModels() ?? [];
