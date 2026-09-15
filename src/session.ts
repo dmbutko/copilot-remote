@@ -711,11 +711,15 @@ export class Session extends EventEmitter {
         this.emit('turn_end', { turnId: e.data.turnId });
         break;
       case 'session.usage_info':
+        if (e.agentId) break;
         this.emit('context_info', {
           tokenLimit: e.data.tokenLimit,
           currentTokens: e.data.currentTokens,
           messagesLength: e.data.messagesLength,
         });
+        break;
+      case 'session.model_change':
+        if (!e.agentId) this.emit('model_changed');
         break;
       case 'tool.execution_start':
         this.toolNameByCallId.set(e.data.toolCallId, e.data.toolName);

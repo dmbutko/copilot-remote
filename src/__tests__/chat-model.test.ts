@@ -84,25 +84,25 @@ describe('resolveReasoning', () => {
 
 describe('overrideFooter', () => {
   it('renders nothing when the chat matches global', () => {
-    assert.equal(overrideFooter(base(), base(), MODELS), '');
+    assert.equal(overrideFooter(base(), base(), 872_000), '');
   });
 
-  it('shows only the fields that differ', () => {
-    const eff = base({ model: 'gpt-6-astra', reasoningEffort: 'max' });
-    assert.equal(overrideFooter(eff, base(), MODELS), '\n\n_gpt-6-astra · max_');
+  it('shows all settings for a different model even when effort and tier match global', () => {
+    const global = base({ model: 'claude-opus-5', reasoningEffort: 'max', contextTier: 'long_context' });
+    const eff = { ...global, model: 'gpt-6-astra' };
+    assert.equal(overrideFooter(eff, global, 872_000), '\n\n_gpt-6-astra · max · 872k_');
   });
 
-  it('renders a differing context tier as the real window size', () => {
-    const eff = base({ model: 'gpt-6-astra', contextTier: 'long_context' });
-    assert.equal(overrideFooter(eff, base(), MODELS), '\n\n_gpt-6-astra · 1050k_');
+  it('uses the observed budget for default context too, without guessing catalogue capacity', () => {
+    const eff = base({ model: 'gpt-6-astra', reasoningEffort: 'xhigh' });
+    assert.equal(overrideFooter(eff, base(), 128_000), '\n\n_gpt-6-astra · xhigh · 128k_');
   });
 
-  it('never prints a window size for the default tier (it would overstate it)', () => {
-    // Both sides use a model that HAS a window limit, so removing the
-    // long_context guard would print "1050k" here and fail.
+  it('still shows only the differing setting when the model matches global', () => {
     const globalLong = base({ model: 'gpt-6-astra', contextTier: 'long_context' });
     const eff = base({ model: 'gpt-6-astra', contextTier: 'default' });
-    assert.equal(overrideFooter(eff, globalLong, MODELS), '\n\n_default_');
+    assert.equal(overrideFooter(eff, globalLong, 128_000), '\n\n_128k_');
+    assert.equal(overrideFooter(base({ reasoningEffort: 'high' }), base(), 128_000), '\n\n_high_');
   });
 
   it('shows an explicitly-cleared reasoning effort as a difference', () => {
@@ -110,12 +110,14 @@ describe('overrideFooter', () => {
     // make a diverged chat look identical to a default one.
     const globalHigh = base({ reasoningEffort: 'high' });
     const eff = base({ reasoningEffort: '' });
-    assert.equal(overrideFooter(eff, globalHigh, MODELS), '\n\n_default effort_');
+    assert.equal(overrideFooter(eff, globalHigh, 872_000), '\n\n_default effort_');
   });
 
-  it('falls back to the tier name when the window size is unknown', () => {
+  it('shows the requested tier until the session reports a valid budget', () => {
     const eff = base({ model: 'claude-opus-5', contextTier: 'long_context' });
-    assert.equal(overrideFooter(eff, base(), MODELS), '\n\n_claude-opus-5 · long_context_');
+    for (const unavailable of [undefined, 0, -1, NaN, Infinity]) {
+      assert.equal(overrideFooter(eff, base(), unavailable), '\n\n_claude-opus-5 · default effort · long_context_');
+    }
   });
 });
 

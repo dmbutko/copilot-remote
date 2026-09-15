@@ -485,14 +485,10 @@ async function main(): Promise<void> {
     return { ok: true, message: durable ? base : `${base} (applied live, but could not be saved to disk)` };
   }
 
-  /**
-   * Footer shown while a chat diverges from global. `listModels()` is cached by
-   * the SDK until disconnect, so this costs nothing per reply.
-   */
-  async function chatOverrideFooter(chatId: string, session: Session): Promise<string> {
+  /** Use the session's reported budget; no catalogue request is needed per reply. */
+  function chatOverrideFooter(chatId: string): string {
     if (!configStore.hasOverrides(chatId)) return '';
-    const models = await session.listModels().catch(() => []);
-    return overrideFooter(configStore.get(chatId), configStore.getGlobal(), models);
+    return overrideFooter(configStore.get(chatId), configStore.getGlobal(), contextInfoMap.get(chatId)?.tokenLimit);
   }
 
   /**
@@ -531,6 +527,8 @@ async function main(): Promise<void> {
 
   // Register persistent listeners on a session (called once per session, not per message)
   function registerSessionListeners(session: Session, chatId: string) {
+    contextInfoMap.delete(chatId);
+    session.on('model_changed', () => contextInfoMap.delete(chatId));
     session.on('usage', (u: Record<string, unknown>) => {
       lastUsageMap.set(chatId, {
         model: u.model as string,
@@ -1502,7 +1500,7 @@ async function main(): Promise<void> {
       // Appended BEFORE finalizeStreamResponse so the suffix is inside the text
       // the chunker measures — appending after would overflow the 4096 cap or
       // split a surrogate pair at the boundary.
-      const withFooter = final + (await chatOverrideFooter(chatId, session));
+      const withFooter = final + chatOverrideFooter(chatId);
       const tgStart = performance.now();
       const finalization = await finalizeStreamResponse({
         client,

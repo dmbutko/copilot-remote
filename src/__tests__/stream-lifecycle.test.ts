@@ -2,6 +2,9 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Button, Client, MessageOptions } from '../client.js';
 import { finalizeStreamResponse } from '../stream-lifecycle.js';
+import { overrideFooter } from '../chat-model.js';
+import { DEFAULT_CONFIG } from '../config-store.js';
+import { markdownToTelegramChunks } from '../format.js';
 
 function createClientSpy() {
   const calls: Array<{ method: string; args: unknown[] }> = [];
@@ -42,6 +45,26 @@ function createClientSpy() {
 }
 
 describe('finalizeStreamResponse', () => {
+  it('includes the complete model footer in chunk sizing without splitting emoji', async () => {
+    const { client, calls } = createClientSpy();
+    const global = { ...DEFAULT_CONFIG, model: 'claude-opus-5', reasoningEffort: 'max', contextTier: 'long_context' as const };
+    const footer = overrideFooter({ ...global, model: 'gpt-6-astra' }, global, 872_000);
+    const final = '🙂'.repeat(2040) + footer;
+    const chunks = markdownToTelegramChunks(final, 4096);
+
+    assert(chunks.length > 1, 'the footer pushes the response beyond one chunk');
+    for (const chunk of chunks) {
+      assert(chunk.text.length <= 4096);
+      assert.equal(Buffer.from(chunk.text).toString('utf8'), chunk.text);
+    }
+    await finalizeStreamResponse({
+      client, chatId: 'chat-1', streamMsgId: 42, final, responseMessageOpts: { replyTo: 7 },
+    });
+    assert.deepEqual(calls.map((c) => c.method), ['deleteMessage', 'sendMessage']);
+    assert.equal(calls[1].args[1], final);
+    assert(final.endsWith('\n\n_gpt-6-astra · max · 872k_'));
+  });
+
   it('edits the streaming placeholder in place for single-chunk replies', async () => {
     const { client, calls } = createClientSpy();
 

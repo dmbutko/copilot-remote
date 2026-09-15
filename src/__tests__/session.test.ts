@@ -84,6 +84,26 @@ afterEach(() => {
 });
 
 describe('Session', () => {
+  it('reports root context updates and model changes without using subagent budgets', () => {
+    const session = createTestSession();
+    const events: unknown[] = [];
+    session.on('context_info', (data: unknown) => events.push(data));
+    session.on('model_changed', () => events.push('model_changed'));
+
+    const oldBudget = { tokenLimit: 936_000, currentTokens: 36_399, messagesLength: 24 };
+    const newBudget = { tokenLimit: 872_000, currentTokens: 30_828, messagesLength: 28 };
+    session.handleEvent({ type: 'session.usage_info', data: oldBudget });
+    session.handleEvent({
+      type: 'session.model_change',
+      data: { newModel: 'gpt-6-astra', previousModel: 'claude-opus-5', contextTier: 'long_context' },
+    });
+    session.handleEvent({ type: 'session.usage_info', data: newBudget });
+    session.handleEvent({ type: 'session.usage_info', agentId: 'subagent-1', data: oldBudget });
+    session.handleEvent({ type: 'session.model_change', agentId: 'subagent-1', data: { newModel: 'claude-opus-5' } });
+
+    assert.deepEqual(events, [oldBudget, 'model_changed', newBudget]);
+  });
+
   it('rejects send before the session is started', async () => {
     const session = new Session();
     await assert.rejects(() => session.send('hello'), /Session not started/);

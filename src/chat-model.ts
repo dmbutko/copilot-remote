@@ -65,30 +65,29 @@ export function formatTokens(n: number): string {
 
 /**
  * Footer shown while a chat diverges from the global defaults, e.g.
- * `_gpt-6-astra · max · 1050k_`. Only differing fields appear, and an
- * identical chat renders nothing so default chats look exactly as before.
+ * `_gpt-6-astra · max · 872k_`. A different model includes all three
+ * settings; otherwise only differing fields appear.
  *
- * Context tier is rendered as the model's actual window size rather than the
- * tier name: the SDK exposes no long-context capability flag, so the tier may
- * silently not apply — the number shows what really happened.
+ * The number is the session's usable prompt budget, as shown by /context,
+ * not the catalogue's maximum. Until a new model reports its budget, show the
+ * requested tier rather than attributing the previous model's size to it.
  */
-export function overrideFooter(effective: ChatConfig, global: ChatConfig, models: ModelLike[]): string {
+export function overrideFooter(effective: ChatConfig, global: ChatConfig, tokenLimit?: number): string {
   const parts: string[] = [];
-  if (effective.model && effective.model !== global.model) parts.push(effective.model);
-  if (effective.reasoningEffort !== global.reasoningEffort) {
+  const modelChanged = !!effective.model && effective.model !== global.model;
+  if (modelChanged) parts.push(effective.model);
+  if (modelChanged || effective.reasoningEffort !== global.reasoningEffort) {
     // An explicit "back to model default" is still a divergence — showing
     // nothing here would hide a chat that deliberately dropped off a global
     // high-reasoning setting.
     parts.push(effective.reasoningEffort || 'default effort');
   }
-  if (effective.contextTier !== global.contextTier) {
-    // Only long_context can be reported as a window size: max_context_window_tokens
-    // is the model's ceiling, which is what long_context asks for. On 'default'
-    // the real window is smaller and unknown to us, so name the tier instead of
-    // printing a number that would overstate it.
-    const info = models.find((m) => modelId(m) === effective.model);
-    const tokens = info?.capabilities?.limits?.max_context_window_tokens;
-    parts.push(effective.contextTier === 'long_context' && tokens ? formatTokens(tokens) : effective.contextTier);
+  if (modelChanged || effective.contextTier !== global.contextTier) {
+    parts.push(
+      tokenLimit !== undefined && Number.isFinite(tokenLimit) && tokenLimit > 0
+        ? formatTokens(tokenLimit)
+        : effective.contextTier,
+    );
   }
   return parts.length ? `\n\n_${parts.join(' · ')}_` : '';
 }
