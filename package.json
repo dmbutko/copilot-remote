@@ -57,7 +57,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@github/copilot": "1.0.84-7",
+    "@github/copilot": "1.0.85",
     "@github/copilot-sdk": "^1.0.9",
     "@grammyjs/auto-retry": "^2.0.2",
     "@grammyjs/files": "^1.2.0",

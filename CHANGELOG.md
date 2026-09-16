@@ -10,6 +10,7 @@
 - **Config validation at startup** — invalid entries in `allowedUsers` throw a clear error instead of silently locking everyone out.
 
 ### Reliability
+- **Stable Copilot CLI** — pin runtime `1.0.85` instead of `1.0.84-7`, retaining SDK `1.0.9` and the existing per-chat settings behavior.
 - **Complete per-chat model footer** — when a chat uses a different model, replies include model, reasoning and the session's usable context budget, even if effort/tier labels match global defaults. Context figures use the same live budget as `/context`, not the catalogue maximum.
 - **Model-switch replay compatibility** — pin Copilot CLI to `1.0.84-7`, keeping SDK `1.0.9`. This pair passed the deferred-tool namespace regression on a copy of the affected history, including queued model switching and resume, without compaction or a history reset.
 - **Configurable per-turn timeout (`turnTimeoutMs`, default 30 min)** — replaces the SDK's 60 s default that aborted tool-heavy turns (Playwright browsing, deep research). Env: `COPILOT_REMOTE_TURN_TIMEOUT_MS`.
