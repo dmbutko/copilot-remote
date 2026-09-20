@@ -335,9 +335,9 @@ export class Session extends EventEmitter {
   get alive() {
     return this._alive;
   }
-  /** Whether a turn is currently in progress (driven by SDK turn_start/turn_end events) */
+  /** Includes accepted/queued sends; root idle ends the active request's steerability. */
   get busy() {
-    return this._turnActive;
+    return this._turnActive || this.pendingTurnReservations.length > 0;
   }
   get sessionId() {
     return this.session?.sessionId ?? null;
@@ -700,13 +700,13 @@ export class Session extends EventEmitter {
         this.emit('usage', e.data);
         break;
       case 'assistant.turn_start':
-        this._turnActive = true;
+        if (!e.agentId) this._turnActive = true;
         this.activeTurnId = e.data.turnId;
         this.claimActiveReservationTurn(e.data.turnId);
         this.emit('turn_start', { turnId: e.data.turnId, interactionId: e.data.interactionId });
         break;
       case 'assistant.turn_end':
-        this._turnActive = false;
+        // Model steps end between tool calls; only root idle ends the request.
         if (this.activeTurnId === e.data.turnId) this.activeTurnId = null;
         this.emit('turn_end', { turnId: e.data.turnId });
         break;
@@ -847,9 +847,13 @@ export class Session extends EventEmitter {
     prompt: string,
     attachments?: FileAttachment[],
     reservation = this.reserveTurn(),
-    opts?: { askMode?: boolean },
+    opts?: { askMode?: boolean; onStart?: () => Promise<void> },
   ): Promise<CopilotMessage> {
-    if (!this._alive) throw new Error('Session not started');
+    const sdk = this.session;
+    if (!this._alive || !sdk) {
+      this.cancelTurnReservation(reservation, 'Session not started');
+      throw new Error('Session not started');
+    }
 
     return this.runInSendQueue(async () => {
       const turnStartedAtMs = Date.now();
@@ -858,14 +862,21 @@ export class Session extends EventEmitter {
       let rawUnsub: (() => void) | null = null;
 
       let askUserMsgId: string | null = null;
-      const unsubscribeAskUserMsg = opts?.askMode
-        ? this.session!.on('user.message', (ev) => {
-            if (!askUserMsgId) askUserMsgId = ev.id;
-          })
-        : null;
+      let unsubscribeAskUserMsg: (() => void) | undefined;
+      const canStart = () => this._alive && this.session === sdk &&
+        this.pendingTurnReservations.some((entry) => entry.reservation === reservation);
 
       try {
+        if (!canStart()) throw new Error('Session changed before send');
+        await opts?.onStart?.();
+        if (!canStart()) throw new Error('Session changed before send');
         this.activeSendReservation = reservation;
+        this._turnActive = true;
+        if (opts?.askMode) {
+          unsubscribeAskUserMsg = sdk.on('user.message', (ev) => {
+            if (!askUserMsgId) askUserMsgId = ev.id;
+          });
+        }
         let text = '';
         onDelta = (event: SessionStreamEvent) => {
           if (!event.turnId || !reservation.ownedTurnIds.has(event.turnId)) return;
@@ -896,7 +907,7 @@ export class Session extends EventEmitter {
           bg.wake = null;
           w?.();
         };
-        rawUnsub = this.session!.on((ev: SessionEvent) => {
+        rawUnsub = sdk.on((ev: SessionEvent) => {
           switch (ev.type) {
             case 'subagent.started':
             case 'session.background_tasks_changed':
@@ -968,7 +979,7 @@ export class Session extends EventEmitter {
           }),
         );
 
-        const result = await Promise.race([this.session!.sendAndWait(sendOpts, this._turnTimeoutMs), errorPromise]);
+        const result = await Promise.race([sdk.sendAndWait(sendOpts, this._turnTimeoutMs), errorPromise]);
         const resultContent =
           (result as { data?: { content?: string }; content?: string } | undefined)?.data?.content ??
           (result as { content?: string } | undefined)?.content ??
@@ -1012,9 +1023,6 @@ export class Session extends EventEmitter {
         }
         throw error;
       } finally {
-        if (this.activeSendReservation === reservation) {
-          this.activeSendReservation = null;
-        }
         if (onDelta) this.off('delta_event', onDelta);
         if (errorHandler) this.off('error', errorHandler);
         if (rawUnsub) rawUnsub();
@@ -1022,13 +1030,18 @@ export class Session extends EventEmitter {
         // so it doesn't pollute future context. Best-effort; truncate is @experimental in SDK.
         if (opts?.askMode && askUserMsgId) {
           try {
-            const r = await this.session!.rpc.history.truncate({ eventId: askUserMsgId });
+            const r = await sdk.rpc.history.truncate({ eventId: askUserMsgId });
             log.info('[ask] truncated history', ...formatLogFields({ eventsRemoved: r.eventsRemoved }));
           } catch (e) {
             log.warn('[ask] history.truncate failed:', e);
           }
         }
         unsubscribeAskUserMsg?.();
+        this.cancelTurnReservation(reservation, 'Turn finished before a start event');
+        if (this.activeSendReservation === reservation) {
+          this.activeSendReservation = null;
+          this._turnActive = false;
+        }
       }
     });
   }
@@ -1130,13 +1143,23 @@ export class Session extends EventEmitter {
     return this.send(prompt, attachments, reservation, { askMode: true });
   }
 
-  /** Send with mode: 'immediate' to steer the agent mid-turn (bypasses queue) */
-  async sendImmediate(prompt: string, attachments?: FileAttachment[]): Promise<void> {
-    if (!this._alive) throw new Error('Session not started');
+  /** Steer an active request; false means it ended and the caller must enqueue a normal send. */
+  async sendImmediate(prompt: string, attachments?: FileAttachment[]): Promise<boolean> {
+    const sdk = this.session;
+    if (!this._alive || !sdk) throw new Error('Session not started');
+    const starting = (this._turnActive ? this.activeSendReservation : null) ??
+      this.pendingTurnReservations[0]?.reservation;
+    if (starting && !starting.currentTurnId) {
+      // A rapid follow-up must not overtake the initial prompt while its UI is starting.
+      await starting.turnId;
+    }
+    if (!this._alive || this.session !== sdk) throw new Error('Session changed before steering');
+    if (!this._turnActive) return false;
     const opts: MessageOptions = { prompt, mode: 'immediate' };
     if (attachments?.length) opts.attachments = attachments;
     // Fire-and-forget: immediate messages steer the current turn, no separate response
-    await this.session!.send(opts);
+    await sdk.send(opts);
+    return true;
   }
 
   approve() {
@@ -1257,6 +1280,10 @@ export class Session extends EventEmitter {
   }
 
   async newSession(opts?: Partial<SessionOptions>): Promise<void> {
+    this._turnActive = false;
+    this.activeTurnId = null;
+    this.activeSendReservation = null;
+    this.clearPendingTurnReservations('Session replaced');
     if (this.session) await this.session.disconnect();
     this.toolNameByCallId.clear();
     const config = this.buildConfig({
@@ -1275,6 +1302,7 @@ export class Session extends EventEmitter {
     this._alive = false;
     this._turnActive = false;
     this.activeTurnId = null;
+    this.activeSendReservation = null;
     this.clearPendingTurnReservations('Session disconnected');
     this.toolNameByCallId.clear();
     try {
@@ -1346,6 +1374,7 @@ export class Session extends EventEmitter {
     this._alive = false;
     this._turnActive = false;
     this.activeTurnId = null;
+    this.activeSendReservation = null;
     this.clearPendingTurnReservations('Session killed');
     this.toolNameByCallId.clear();
     try {

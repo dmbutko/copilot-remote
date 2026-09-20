@@ -222,7 +222,11 @@ export class TelegramClient implements Client {
     this.bot = new Bot<MyContext>(config.botToken);
 
     // ── Plugins ──
-    this.bot.api.config.use(apiThrottler());
+    const throttle = apiThrottler();
+    // Typing is transient presence, not a message: it must not queue ahead of replies.
+    this.bot.api.config.use((prev, method, payload, signal) =>
+      method === 'sendChatAction' ? prev(method, payload, signal) : throttle(prev, method, payload, signal),
+    );
     this.bot.api.config.use(autoRetry({ maxRetryAttempts: 5, maxDelaySeconds: 30 }));
     const defaultParseMode: Transformer = (prev, method, payload, signal) => {
       if (!('parse_mode' in payload)) {

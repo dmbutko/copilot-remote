@@ -24,6 +24,12 @@ function createTestSession() {
   return session;
 }
 
+function createGate() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 function createFakeSdkSession(
   impl?: (opts: Record<string, unknown>, timeout: number) => Promise<unknown>,
 ): FakeSdkSession {
@@ -107,6 +113,179 @@ describe('Session', () => {
   it('rejects send before the session is started', async () => {
     const session = new Session();
     await assert.rejects(() => session.send('hello'), /Session not started/);
+    assert.equal(session.busy, false, 'a rejected send must release its reservation');
+  });
+
+  it('claims busy before UI/SDK startup and keeps it between model turns until the send finishes', async () => {
+    const session = createTestSession();
+    const ui = createGate();
+    const result = createGate();
+    const sdk = createFakeSdkSession(async () => {
+      session.handleEvent({ type: 'assistant.turn_start', data: { turnId: 'first' } });
+      session.handleEvent({ type: 'assistant.turn_end', data: { turnId: 'first' } });
+      await result.promise;
+      session.handleEvent({ type: 'session.idle', data: {} });
+      return { data: { content: 'done' } };
+    });
+    session.session = sdk;
+
+    const reservation = session.reserveTurn();
+    assert.equal(session.busy, true, 'the reservation closes the pre-placeholder race');
+    const pending = session.send('first', undefined, reservation, { onStart: () => ui.promise });
+    const steering = session.sendImmediate('follow-up');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(sdk.sendAndWaitCalls.length, 0);
+    assert.equal(sdk.sendCalls.length, 0, 'steering must not overtake a pending initial prompt');
+
+    ui.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await steering;
+    assert.equal(sdk.sendAndWaitCalls.length, 1);
+    assert.deepEqual(sdk.sendCalls, [{ prompt: 'follow-up', mode: 'immediate' }]);
+    assert.equal(session.busy, true, 'a model turn ending does not end the whole request');
+
+    result.resolve();
+    await pending;
+    assert.equal(session.busy, false);
+  });
+
+  it('starts queued request UI only when that request owns the send queue', async () => {
+    const session = createTestSession();
+    const firstFinished = createGate();
+    const secondFinished = createGate();
+    const started: string[] = [];
+    const sdk = createFakeSdkSession(async (opts) => {
+      const prompt = String(opts.prompt);
+      session.handleEvent({ type: 'assistant.turn_start', data: { turnId: prompt } });
+      await (prompt === 'first' ? firstFinished.promise : secondFinished.promise);
+      session.handleEvent({ type: 'session.idle', data: {} });
+      return { data: { content: prompt } };
+    });
+    session.session = sdk;
+    const first = session.send('first', undefined, undefined, {
+      onStart: async () => { started.push('first'); },
+    });
+    const second = session.send('second', undefined, undefined, {
+      onStart: async () => { started.push('second'); },
+    });
+
+    assert.equal(session.busy, true);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(started, ['first'], 'queued messages must not run their own UI loops');
+    firstFinished.resolve();
+    await first;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(started, ['first', 'second']);
+    assert.equal(session.busy, true, 'the completed first request cannot clear the next owner');
+    secondFinished.resolve();
+    await second;
+    assert.equal(session.busy, false);
+  });
+
+  it('releases busy and waiting steering after startup fails, allowing the next request', async () => {
+    const session = createTestSession();
+    const sdk = createFakeSdkSession();
+    session.session = sdk;
+    const reservation = session.reserveTurn();
+    const pending = session.send('first', undefined, reservation, {
+      onStart: async () => { throw new Error('placeholder failed'); },
+    });
+    const steering = session.sendImmediate('follow-up');
+    await Promise.all([
+      assert.rejects(pending, /placeholder failed/),
+      assert.rejects(steering, /placeholder failed/),
+    ]);
+    assert.equal(session.busy, false);
+    assert.equal(sdk.sendAndWaitCalls.length, 0);
+    assert.equal(sdk.sendCalls.length, 0);
+    assert.equal((await session.send('next')).content, 'final:next');
+    assert.equal(session.busy, false, 'a final response without start events must also release busy');
+  });
+
+  it('clears busy after SDK failure and rejects a not-yet-started steering waiter', async () => {
+    const session = createTestSession();
+    const sdk = createFakeSdkSession(async () => { throw new Error('SDK failed'); });
+    session.session = sdk;
+    const first = session.send('first');
+    const steering = session.sendImmediate('follow-up');
+    await Promise.all([
+      assert.rejects(first, /SDK failed/),
+      assert.rejects(steering, /SDK failed/),
+    ]);
+    assert.equal(session.busy, false);
+    assert.equal(sdk.sendCalls.length, 0);
+  });
+
+  it('does not steer into a request that went idle while its first-start waiter was waking', async () => {
+    const session = createTestSession();
+    const sdk = createFakeSdkSession(async () => {
+      session.handleEvent({ type: 'assistant.turn_start', data: { turnId: 'first' } });
+      session.handleEvent({ type: 'session.idle', data: {} });
+      return { data: { content: 'done' } };
+    });
+    session.session = sdk;
+    const first = session.send('first');
+    const steering = session.sendImmediate('follow-up');
+    assert.equal(await steering, false, 'caller must route this as a fresh queued request');
+    await first;
+    assert.equal(sdk.sendCalls.length, 0);
+    assert.equal(session.busy, false);
+  });
+
+  it('bare root idle ends steering even while background-result collection still owns the send', async () => {
+    const session = createTestSession();
+    const captured = createGate();
+    const followup = createGate();
+    const sdk = createFakeSdkSession(async () => {
+      session.handleEvent({ type: 'assistant.turn_start', data: { turnId: 'first' } });
+      sdk.emit({ type: 'subagent.started', data: {} });
+      session.handleEvent({ type: 'assistant.turn_end', data: { turnId: 'first' } });
+      session.handleEvent({ type: 'session.idle', data: {} });
+      return { data: { content: 'stopped' } };
+    });
+    session.session = sdk;
+    session.captureBackgroundFollowups = async () => {
+      captured.resolve();
+      await followup.promise;
+      return null;
+    };
+    const first = session.send('first');
+    await captured.promise;
+    assert.equal(session.busy, false, 'bare idle must not steer new input into an ended request');
+    let nextStarted = false;
+    const next = session.send('next', undefined, undefined, {
+      onStart: async () => { nextStarted = true; },
+    });
+    assert.equal(sdk.sendCalls.length, 0);
+    assert.equal(nextStarted, false, 'new input still waits for ownership cleanup');
+    followup.resolve();
+    await Promise.all([first, next]);
+    assert.equal(nextStarted, true);
+    assert.equal(session.busy, false);
+  });
+
+  it('does not claim unrelated turns or submit to a replacement session while UI startup is pending', async () => {
+    const session = createTestSession();
+    const ui = createGate();
+    const sdk = createFakeSdkSession();
+    const replacement = createFakeSdkSession();
+    session.session = sdk;
+    const reservation = session.reserveTurn();
+    const pending = session.send('first', undefined, reservation, { onStart: () => ui.promise });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    session.handleEvent({ type: 'assistant.turn_start', data: { turnId: 'unrelated' } });
+    session.handleEvent({ type: 'session.idle', data: {} });
+    assert.equal(reservation.currentTurnId, null, 'UI setup is not an SDK turn owner');
+
+    await session.disconnect();
+    session.session = replacement;
+    session._alive = true;
+    const rejected = assert.rejects(pending, /Session changed before send/);
+    ui.resolve();
+    await rejected;
+    assert.equal(sdk.sendAndWaitCalls.length, 0);
+    assert.equal(replacement.sendAndWaitCalls.length, 0);
+    assert.equal(session.busy, false);
   });
 
   it('reloadMcpServers waits for an in-flight send, then reloads exactly once', async () => {
@@ -146,9 +325,10 @@ describe('Session', () => {
     const session = createTestSession();
     const sdk = createFakeSdkSession();
     session.session = sdk;
+    session.handleEvent({ type: 'assistant.turn_start', data: { turnId: 'active' } });
 
     const attachments = [{ type: 'file', path: '/tmp/demo.txt' }];
-    await session.sendImmediate('steer this turn', attachments as never);
+    assert.equal(await session.sendImmediate('steer this turn', attachments as never), true);
 
     assert.equal(sdk.sendCalls.length, 1);
     assert.deepEqual(sdk.sendCalls[0], {

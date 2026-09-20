@@ -1,6 +1,6 @@
 import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import type { Bot } from 'grammy';
+import type { ApiCallFn, Bot } from 'grammy';
 import type { Update, UserFromGetMe } from 'grammy/types';
 import { SLOW_POLL_MS, TelegramClient, withAbortTimeout } from '../telegram.js';
 
@@ -807,6 +807,60 @@ describe('sendButtons — callback_data 64-byte guard', () => {
     const lastUnit = sent.charCodeAt(sent.length - 1);
     assert.ok(!(lastUnit >= 0xd800 && lastUnit <= 0xdbff), 'must not end on a lone high surrogate');
     assert.equal(Buffer.from(sent, 'utf8').toString('utf8'), sent, 'must round-trip as valid UTF-8');
+  });
+});
+
+describe('typing and message throttling', () => {
+  it('typing in two topics bypasses the group budget while messages and edits remain throttled', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+    const client = new TelegramClient({ botToken: 'test-token', allowedUsers: [] });
+    const throttle = getBot(client).api.config.installedTransformers()[0];
+    const calls: Array<{ method: string; at: number }> = [];
+    const terminal: ApiCallFn = async (method) => {
+      calls.push({ method, at: Date.now() });
+      return { ok: false, error_code: 400, description: 'Test transport; no network' };
+    };
+    const typing = Array.from({ length: 40 }, (_, i) =>
+      throttle(terminal, 'sendChatAction', {
+        chat_id: -100123,
+        message_thread_id: i % 2 === 0 ? 10 : 20,
+        action: 'typing',
+      }),
+    );
+    assert.equal(calls.length, 40, 'typing must not wait for the 20/minute group reservoir');
+    await Promise.all(typing);
+
+    let completed = 0;
+    const messages = [
+      throttle(terminal, 'sendMessage', { chat_id: -100123, message_thread_id: 10, text: 'first' }),
+      throttle(terminal, 'editMessageText', { chat_id: -100123, message_id: 1, text: 'progress' }),
+      throttle(terminal, 'sendMessage', { chat_id: -100123, message_thread_id: 20, text: 'second' }),
+    ].map((pending) => pending.then(() => { completed++; }));
+    assert.equal(calls.length, 40, 'ordinary messages must still pass through the limiter');
+    for (let step = 0; step < 40; step++) {
+      t.mock.timers.tick(1000);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.equal(completed, 3, 'typing must leave message capacity available in the same group');
+    await Promise.all(messages);
+    const scheduled = calls.filter((call) => call.method !== 'sendChatAction');
+    assert(scheduled[1].at - scheduled[0].at >= 1000);
+    assert(scheduled[2].at - scheduled[1].at >= 1000, 'topics share the existing message limiter');
+  });
+
+  it('typing still goes through the installed Telegram 429 retry handler', async () => {
+    const client = new TelegramClient({ botToken: 'test-token', allowedUsers: [] });
+    const [throttle, retry] = getBot(client).api.config.installedTransformers();
+    let attempts = 0;
+    const terminal: ApiCallFn = async () => {
+      attempts++;
+      return attempts === 1
+        ? { ok: false, error_code: 429, description: 'Too Many Requests', parameters: { retry_after: 0 } }
+        : { ok: false, error_code: 400, description: 'Test transport; no network' };
+    };
+    const next: ApiCallFn = (method, payload, signal) => throttle(terminal, method, payload, signal);
+    await retry(next, 'sendChatAction', { chat_id: -100123, action: 'typing' });
+    assert.equal(attempts, 2);
   });
 });
 

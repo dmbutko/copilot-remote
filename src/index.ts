@@ -1062,31 +1062,22 @@ async function main(): Promise<void> {
       if (typingInterval) { clearInterval(typingInterval); typingInterval = null; }
       react('⚡');
       try {
-        await session.sendImmediate(prompt, attachments);
-        react('✅');
+        if (await session.sendImmediate(prompt, attachments)) {
+          react('✅');
+          return;
+        }
       } catch (e) {
         react('❌');
         log.debug('Immediate send failed:', e);
+        return;
       }
-      return;
     }
-    // Send placeholder immediately so user knows we're working
-    await sendPlaceholder();
-    // One heartbeat for both jobs: keep the typing indicator alive AND tick the progress
-    // bubble. Typing renders in the chat header, so it is the only indicator that cannot
-    // be buried when the agent sends media (26-Aug: ten photos pushed the bubble out of
-    // view and the user had no sign a 21-min turn was running). 4s, not 3s — the group
-    // throttler allows 20 calls/min total and every chat_id call counts, so a 3s pulse
-    // would eat the whole budget; 4s still beats Telegram's ~5s typing expiry.
-    // updateProgress() self-rate-limits to PROGRESS_INTERVAL_MS.
-    if (streamMsgId && typingInterval) {
-      clearInterval(typingInterval);
-      typingInterval = setInterval(() => {
-        sendTypingSafe();
-        void updateProgress();
-      }, 4000);
-    }
+    // Claim the request before awaiting its placeholder or the SDK's first turn event.
     const turnReservation = session.reserveTurn();
+    if (typingInterval) {
+      clearInterval(typingInterval);
+      typingInterval = null;
+    }
 
     const noteFirstStreamEvent = (phase: 'thinking' | 'response', chunk: string) => {
       if (firstStreamPhase) return;
@@ -1355,7 +1346,19 @@ async function main(): Promise<void> {
         `mode=${session.messageMode ?? 'enqueue'}`,
       );
       markTimeline('send', `mode=${session.messageMode ?? 'enqueue'}`);
-      res = await session.send(prompt, attachments, turnReservation, opts);
+      res = await session.send(prompt, attachments, turnReservation, {
+        ...opts,
+        onStart: async () => {
+          // Queued requests own no heartbeat until their send actually starts.
+          // Keep typing visible even when media buries the progress bubble.
+          sendTypingSafe();
+          typingInterval = setInterval(() => {
+            sendTypingSafe();
+            void updateProgress();
+          }, 4000);
+          await sendPlaceholder();
+        },
+      });
     } catch (sendErr) {
       log.error('[prompt:error]', sendErr);
       cleanup();
