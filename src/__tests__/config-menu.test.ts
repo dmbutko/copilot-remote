@@ -1,7 +1,20 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { sendConfigMenu, handleConfigCallback } from '../config-menu.js';
+import type { ModelInfo } from '@github/copilot-sdk';
+import { sendConfigMenu, sendModelPicker, sendReasoningMenu, handleConfigCallback } from '../config-menu.js';
 import { DEFAULT_CONFIG, type ChatConfig } from '../config-store.js';
+
+function model(id: string, supportedReasoningEfforts: ModelInfo['supportedReasoningEfforts'] = ['low', 'high']): ModelInfo {
+  return {
+    id,
+    name: id,
+    supportedReasoningEfforts,
+    capabilities: {
+      supports: { vision: false, reasoningEffort: true },
+      limits: { max_context_window_tokens: 128_000 },
+    },
+  };
+}
 
 function createDeps(initialConfig?: Partial<ChatConfig>) {
   const state = {
@@ -14,6 +27,9 @@ function createDeps(initialConfig?: Partial<ChatConfig>) {
     deletedSessionStoreKeys: [] as string[],
     getSessionCalls: 0,
     suspendCalls: 0,
+    models: [] as ModelInfo[],
+    listModelsError: null as Error | null,
+    listModelsCalls: 0,
   };
 
   const client = {
@@ -63,7 +79,11 @@ function createDeps(initialConfig?: Partial<ChatConfig>) {
       delete: (key: string) => state.deletedSessionStoreKeys.push(key),
       get: () => undefined,
     },
-    listModels: async () => [],
+    listModels: async () => {
+      state.listModelsCalls++;
+      if (state.listModelsError) throw state.listModelsError;
+      return structuredClone(state.models);
+    },
     workDir: () => '/tmp/project',
     bin: 'copilot',
     getSession: async () => {
@@ -102,6 +122,81 @@ describe('config-menu', () => {
     const rendered = String(call?.text ?? '') + ' | ' + buttons.flat().map((b) => b.text).join(' | ');
     assert.ok(rendered.includes('global-model'), 'must render the global default');
     assert.ok(!rendered.includes('chat-override-model'), 'must not render a per-chat override as the global default');
+  });
+
+  it('shows newly available models when the picker is reopened', async () => {
+    const { state, deps } = createDeps({ model: 'existing-model' });
+    state.models = [model('existing-model')];
+    await sendModelPicker('chat-1', 10, deps as never);
+    const before = JSON.stringify(deps.client.editButtonsCalls.at(-1)?.buttons);
+    assert.ok(!before.includes('new-model'));
+
+    state.models.push(model('new-model'));
+    await sendModelPicker('chat-1', 10, deps as never);
+
+    const after = JSON.stringify(deps.client.editButtonsCalls.at(-1)?.buttons);
+    assert.ok(after.includes('new-model'));
+    assert.equal(state.listModelsCalls, 2);
+    assert.equal(state.getSessionCalls, 0, 'listing must not create or resume a chat');
+  });
+
+  it('refreshes reasoning capabilities rather than reusing the previous menu', async () => {
+    const { state, deps } = createDeps({ model: 'existing-model' });
+    state.models = [model('existing-model', ['low', 'high'])];
+    await sendReasoningMenu('chat-1', 10, deps as never);
+    assert.ok(!JSON.stringify(deps.client.editButtonsCalls.at(-1)?.buttons).includes('reason:max'));
+
+    state.models = [model('existing-model', ['low', 'high', 'max'])];
+    await sendReasoningMenu('chat-1', 10, deps as never);
+
+    assert.ok(JSON.stringify(deps.client.editButtonsCalls.at(-1)?.buttons).includes('reason:max'));
+    assert.equal(state.listModelsCalls, 2);
+  });
+
+  it('rejects a stale model button without changing settings or rebuilding', async () => {
+    const { state, deps } = createDeps({ model: 'existing-model', reasoningEffort: 'high', contextTier: 'long_context' });
+    state.models = [model('existing-model'), model('removed-model')];
+    await sendModelPicker('chat-1', 10, deps as never);
+    state.models = [model('existing-model')];
+    const before = structuredClone(state.config);
+
+    await handleConfigCallback('model:removed-model', 'chat-1', 10, 'stale-button', deps as never);
+
+    assert.deepEqual(state.config, before);
+    assert.equal(state.getSessionCalls, 0);
+    assert.equal(state.suspendCalls, 0);
+    assert.match(String(deps.client.answerCallbackCalls.at(-1)?.text), /Model unavailable/);
+    assert.ok(!JSON.stringify(deps.client.editButtonsCalls.at(-1)?.buttons).includes('removed-model'));
+  });
+
+  it('uses fresh capabilities when selecting a new global model and preserves context tier', async () => {
+    const { state, deps } = createDeps({ model: 'existing-model', reasoningEffort: 'high', contextTier: 'long_context' });
+    state.models = [model('existing-model'), model('new-model', ['low', 'medium'])];
+
+    await handleConfigCallback('model:new-model', 'chat-1', 10, 'new-model-button', deps as never);
+
+    assert.equal(state.config.model, 'new-model');
+    assert.equal(state.config.reasoningEffort, '', 'incompatible inherited effort must be cleared');
+    assert.equal(state.config.contextTier, 'long_context');
+    assert.equal(state.getSessionCalls, 1);
+    assert.equal(state.suspendCalls, 1);
+  });
+
+  it('shows explicit errors after a successful lookup instead of stale or invented models', async () => {
+    const { state, deps } = createDeps({ model: 'existing-model' });
+    state.models = [model('existing-model')];
+    await sendModelPicker('chat-1', 10, deps as never);
+    state.listModelsError = new Error('catalogue unavailable');
+    const before = structuredClone(state.config);
+
+    await sendModelPicker('chat-1', 10, deps as never);
+    assert.match(String(deps.client.editButtonsCalls.at(-1)?.text), /Couldn't load models/);
+    assert.ok(!JSON.stringify(deps.client.editButtonsCalls.at(-1)?.buttons).includes('model:existing-model'));
+    await sendReasoningMenu('chat-1', 10, deps as never);
+    assert.match(String(deps.client.editButtonsCalls.at(-1)?.text), /Couldn't load model capabilities/);
+    await handleConfigCallback('model:existing-model', 'chat-1', 10, 'failed-lookup', deps as never);
+    assert.deepEqual(state.config, before);
+    assert.equal(state.getSessionCalls, 0);
   });
 
   it('toggles message mode and updates the live session setting', async () => {

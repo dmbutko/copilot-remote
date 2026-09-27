@@ -91,7 +91,7 @@ Like Claude Remote Control, the important bit is that the local process must sta
 - **Inline permissions** — approve/deny with buttons, reactions, or reply text
 - **Queued messages by default** — follow-up Telegram messages wait their turn instead of silently steering the current one
 - **Three modes** — Interactive (approve each), Plan (review first), Autopilot (approve all)
-- **Model switching** — pick from available models via `/config`
+- **Model switching** — global defaults via `/config` or per-chat requests; both query the CLI for model lists and reasoning capabilities on each lookup, bypassing the SDK's lifetime cache
 - **Reasoning effort** — off/low/medium/high per model capability
 - **Forum topics** — each Telegram topic = isolated Copilot session with its own context
 - **Voice messages** — transcribed and forwarded to Copilot

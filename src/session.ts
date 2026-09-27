@@ -234,7 +234,7 @@ export class Session extends EventEmitter {
    * List available models via the shared client WITHOUT creating or resuming a
    * chat session. Models are account-level, so the picker must not depend on a
    * (possibly broken) per-chat session. Uses getSharedClient so it awaits an
-   * in-flight prewarm and recreates after a reset.
+   * in-flight prewarm and recreates after a reset, bypassing the SDK's cache.
    */
   static async listModelsShared(opts?: {
     binary?: string;
@@ -242,12 +242,11 @@ export class Session extends EventEmitter {
     githubToken?: string;
     provider?: RemoteProviderConfig;
   }): Promise<ModelInfo[]> {
-    const client = await Session.getSharedClient(opts, false);
-    return client.listModels();
+    return Session.listModelsFresh(opts);
   }
 
   /**
-   * Uncached catalogue fetch. `listModels()` caches for the client's lifetime and
+   * Uncached catalogue fetch. `CopilotClient.listModels()` caches for the client's lifetime and
    * the shared client deliberately outlives sessions (`releaseClient` keeps it
    * alive at zero references), so session teardown does NOT refresh it. Callers
    * that must prove a model is really gone have to bypass that cache.
@@ -1207,7 +1206,9 @@ export class Session extends EventEmitter {
     return { modelId: res?.modelId, deferred: res?.deferred };
   }
   async listModels(): Promise<ModelInfo[]> {
-    return this.client?.listModels() ?? [];
+    if (!this.client) return [];
+    const res = await this.client.rpc.models.list({});
+    return res.models as ModelInfo[];
   }
   async setMode(mode: string) {
     await this.session!.rpc.mode.set({ mode: mode as 'interactive' | 'plan' | 'autopilot' });

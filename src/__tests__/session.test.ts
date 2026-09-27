@@ -1,7 +1,9 @@
 import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { CopilotClient, RuntimeConnection, type ModelInfo } from '@github/copilot-sdk';
 import { Session } from '../session.js';
 import type { AssistantPlanEvent } from '../session.js';
+import { resolveModel, resolveReasoning } from '../chat-model.js';
 
 type FakeEventHandler = (event: unknown) => void;
 type FakeTypedHandler = (event: any) => void;
@@ -28,6 +30,39 @@ function createGate() {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => { resolve = done; });
   return { promise, resolve };
+}
+
+function createCatalogueClient() {
+  const state: { models: ModelInfo[]; error: Error | null; requests: number } = {
+    models: [
+      {
+        id: 'existing-model',
+        name: 'Existing model',
+        supportedReasoningEfforts: ['low', 'high'],
+        capabilities: {
+          supports: { vision: true, reasoningEffort: true },
+          limits: { max_context_window_tokens: 128_000 },
+        },
+      },
+    ],
+    error: null,
+    requests: 0,
+  };
+  const client = new CopilotClient({ connection: RuntimeConnection.forUri('http://127.0.0.1:4141') });
+  Object.defineProperty(client, 'connection', {
+    value: {
+      async sendRequest(method: string, params: unknown) {
+        assert.equal(method, 'models.list');
+        assert.deepEqual(params, {});
+        state.requests++;
+        if (state.error) throw state.error;
+        return { models: structuredClone(state.models) };
+      },
+    },
+  });
+  const session = new Session();
+  Object.defineProperty(session, 'client', { value: client });
+  return { state, client, session };
 }
 
 function createFakeSdkSession(
@@ -87,6 +122,97 @@ const realClearTimeout = globalThis.clearTimeout;
 afterEach(() => {
   globalThis.setTimeout = realSetTimeout;
   globalThis.clearTimeout = realClearTimeout;
+});
+
+describe('model catalogue refresh', () => {
+  const originalGetSharedClient = Session['getSharedClient'];
+
+  afterEach(() => {
+    Session['getSharedClient'] = originalGetSharedClient;
+  });
+
+  it('refreshes global and per-chat lookups despite a populated SDK cache', async () => {
+    const { state, client, session } = createCatalogueClient();
+    const options = { binary: 'copilot', githubToken: 'test-token' };
+    const bootstraps: unknown[] = [];
+    Session['getSharedClient'] = async (opts, retain) => {
+      bootstraps.push({ opts, retain });
+      return client;
+    };
+
+    const cached = await client.listModels();
+    assert.deepEqual(await Session.listModelsShared(options), cached);
+    assert.deepEqual(await session.listModels(), cached);
+
+    state.models.push({
+      id: 'new-model',
+      name: 'New model',
+      supportedReasoningEfforts: ['low', 'high', 'max'],
+      capabilities: {
+        supports: { vision: true, reasoningEffort: true },
+        limits: { max_context_window_tokens: 1_000_000 },
+      },
+      policy: { state: 'enabled', terms: 'test terms' },
+      billing: { multiplier: 2 },
+    });
+    const [globalModels, chatModels] = await Promise.all([
+      Session.listModelsShared(options),
+      session.listModels(),
+    ]);
+
+    assert.deepEqual(globalModels, state.models);
+    assert.deepEqual(chatModels, state.models);
+    assert.deepEqual(resolveModel('new-model', chatModels), { id: 'new-model' });
+    assert.deepEqual(resolveReasoning('highest', chatModels[1]), { effort: 'max' });
+    assert.deepEqual(await client.listModels(), cached, 'the real SDK cache remains stale');
+    assert.equal(state.requests, 5, 'each bridge lookup must reach the RPC without reconnecting');
+    assert.deepEqual(bootstraps, [{ opts: options, retain: false }, { opts: options, retain: false }]);
+  });
+
+  it('observes removed models and changed capabilities without replacing the client', async () => {
+    const { state, client, session } = createCatalogueClient();
+    Session['getSharedClient'] = async () => client;
+    await client.listModels();
+    await Session.listModelsShared();
+    await session.listModels();
+
+    state.models = [{
+      ...state.models[0],
+      supportedReasoningEfforts: ['low', 'medium'],
+      capabilities: {
+        supports: { vision: false, reasoningEffort: true },
+        limits: { max_context_window_tokens: 256_000 },
+      },
+    }];
+    for (const models of [await Session.listModelsShared(), await session.listModels()]) {
+      assert.deepEqual(models, state.models);
+      assert.deepEqual(resolveReasoning('highest', models[0]), { effort: 'medium' });
+    }
+
+    state.models = [];
+    assert.deepEqual(await Session.listModelsShared(), []);
+    assert.deepEqual(await session.listModels(), []);
+  });
+
+  it('propagates lookup failures instead of falling back to cached models, then recovers', async () => {
+    const { state, client, session } = createCatalogueClient();
+    Session['getSharedClient'] = async () => client;
+    await client.listModels();
+    const failure = new Error('catalogue unavailable');
+    state.error = failure;
+
+    await assert.rejects(Session.listModelsShared(), (error) => error === failure);
+    await assert.rejects(session.listModels(), (error) => error === failure);
+    await assert.rejects(Session.listModelsFresh(), (error) => error === failure);
+
+    state.error = null;
+    assert.deepEqual(await Session.listModelsShared(), state.models);
+    assert.deepEqual(await session.listModels(), state.models);
+  });
+
+  it('preserves the empty result for a session with no client', async () => {
+    assert.deepEqual(await new Session().listModels(), []);
+  });
 });
 
 describe('Session', () => {
